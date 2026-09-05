@@ -7,7 +7,7 @@ load_dotenv()
 WEEX_API_KEY = os.getenv("WEEX_API_KEY", "")
 WEEX_API_SECRET = os.getenv("WEEX_API_SECRET", "")
 WEEX_PASSPHRASE = os.getenv("WEEX_PASSPHRASE", "")
-WEEX_BASE_URL = os.getenv("WEEX_BASE_URL", "https://api.weex.com")
+WEEX_BASE_URL = os.getenv("WEEX_BASE_URL", "https://api-contract.weex.com")
 
 # --- Telegram Alert Settings ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
