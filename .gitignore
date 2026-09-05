@@ -1,0 +1,17 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.pkl
+*.parquet
+venv/
+.venv/
+
+# State and logs
+bot_state.json
+*.log
+logs/
+.DS_Store
