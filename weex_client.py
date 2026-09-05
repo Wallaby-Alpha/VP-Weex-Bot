@@ -26,10 +26,17 @@ class WeexClient:
         passphrase: str = config.WEEX_PASSPHRASE,
         base_url: str = config.WEEX_BASE_URL,
     ):
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.passphrase = passphrase
-        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key.strip()
+        self.api_secret = api_secret.strip()
+        self.passphrase = passphrase.strip()
+        
+        # Defensive cleanup: strip accidental prefixes or quotes
+        clean_url = base_url.strip().strip("'\"")
+        if clean_url.startswith("WEEX_BASE_URL="):
+            clean_url = clean_url.replace("WEEX_BASE_URL=", "").strip().strip("'\"")
+        if not clean_url.startswith("http"):
+            clean_url = f"https://{clean_url}"
+        self.base_url = clean_url.rstrip("/")
         self.session = requests.Session()
 
     def generate_signature(self, timestamp: str, method: str, path: str, body_str: str) -> str:
