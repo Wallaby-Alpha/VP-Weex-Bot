@@ -37,10 +37,10 @@ RSI_SHORT_MIN = 54.0        # Must be exhausting from overbought
 MAX_CONSECUTIVE_LOSSES = 2
 CIRCUIT_BREAKER_FREEZE_BARS = 24  # Freeze coin for 2 hours on 2 losses
 
-# --- Universe Screener ---
-MIN_24H_VOLUME_USD = 400_000
-MAX_24H_VOLUME_USD = 6_000_000
-MAX_PAIRS = 20
+# --- Universe Screener (Top 200 by Volume) ---
+MIN_24H_VOLUME_USD = 1_000_000        # Minimum $1M 24h volume
+MAX_24H_VOLUME_USD = float("inf")     # No upper cap: captures top high-volume movers
+MAX_PAIRS = 200                       # Scan top 200 coins
 
 # Blacklist: Non-viable meme tokens and BTC-slaved dinosaur coins
 EXCLUDED_SUBSTRINGS = [

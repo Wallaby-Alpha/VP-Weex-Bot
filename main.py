@@ -71,15 +71,22 @@ def main():
                 last_universe_refresh = time.time()
 
             signals_detected = 0
-            for symbol in universe:
+            from concurrent.futures import ThreadPoolExecutor
+
+            def scan_worker(sym):
                 try:
-                    signal = scanner.evaluate_signal(symbol)
-                    if signal:
-                        signals_detected += 1
-                        logger.info(f"SIGNAL DETECTED on {symbol}: {signal['side']} (R:R={signal['rr']:.2f}, Reward={signal['reward_pct']:.2f}%)")
-                        executor.execute_signal(signal)
+                    return scanner.evaluate_signal(sym)
                 except Exception as e:
-                    logger.error(f"Error evaluating {symbol}: {e}")
+                    logger.error(f"Error evaluating {sym}: {e}")
+                    return None
+
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                results = pool.map(scan_worker, universe)
+                for sig in results:
+                    if sig:
+                        signals_detected += 1
+                        logger.info(f"SIGNAL DETECTED on {sig['symbol']}: {sig['side']} (R:R={sig['rr']:.2f}, Reward={sig['reward_pct']:.2f}%)")
+                        executor.execute_signal(sig)
 
             logger.info(f"Scan complete in {time.time() - scan_start:.2f}s. Signals triggered: {signals_detected}")
 
