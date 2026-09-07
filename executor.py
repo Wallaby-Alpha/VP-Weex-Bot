@@ -56,12 +56,12 @@ class TradeExecutor:
             "quantityPrecision": 2,
             "minOrderSize": 0.001
         })
-        price_prec = meta["pricePrecision"]
-        qty_prec = meta["quantityPrecision"]
-        min_qty = meta["minOrderSize"]
+        price_prec = int(meta.get("pricePrecision", 4))
+        qty_prec = int(meta.get("quantityPrecision", 2))
+        min_qty = float(meta.get("minOrderSize", 0.001))
 
         # 4. Position Sizing
-        entry_price = signal["entry_price"]
+        entry_price = float(signal["entry_price"])
         available_balance = self.weex.get_available_margin()
         if available_balance <= 0:
             available_balance = 1000.0  # Safe simulation baseline for dry-run
@@ -76,10 +76,19 @@ class TradeExecutor:
         quantity = math.floor(raw_qty * factor) / factor
         if quantity < min_qty:
             quantity = min_qty
+        if qty_prec == 0 or quantity.is_integer():
+            quantity = int(quantity)
 
         # Format TP & SL to price precision
-        tp_price = round(signal["take_profit"], price_prec)
-        sl_price = round(signal["stop_loss"], price_prec)
+        tp_raw = signal.get("take_profit")
+        sl_raw = signal.get("stop_loss")
+        tp_price = round(float(tp_raw), price_prec) if tp_raw is not None else None
+        sl_price = round(float(sl_raw), price_prec) if sl_raw is not None else None
+        if price_prec == 0:
+            if tp_price is not None:
+                tp_price = int(tp_price)
+            if sl_price is not None:
+                sl_price = int(sl_price)
 
         trade_record = {
             "symbol": symbol,
@@ -136,6 +145,6 @@ class TradeExecutor:
 
         except Exception as e:
             err_msg = f"Fatal execution exception on {symbol}: {e}"
-            logger.error(err_msg)
+            logger.error(err_msg, exc_info=True)
             self.notifier.notify_error(err_msg)
             return False

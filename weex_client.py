@@ -166,8 +166,16 @@ class WeexClient:
             "isolatedShortLeverage": str(leverage)
         }
         res = self.request("POST", "/capi/v3/account/leverage", payload)
-        code = res.get("code")
-        return code in (0, "0", 200, "200") or res.get("success", False)
+        if not isinstance(res, dict):
+            return False
+        code = str(res.get("code", ""))
+        return (
+            code in ("0", "00000", "200")
+            or res.get("symbol") == symbol
+            or "crossLeverage" in res
+            or "isolatedLongLeverage" in res
+            or res.get("success", False)
+        )
 
     def place_order_with_tpsl(
         self,
@@ -187,30 +195,57 @@ class WeexClient:
         if not cid.startswith("b-"):
             cid = f"b-{cid}"
 
+        # Clean quantity representation (avoid decimal for whole contract counts)
+        try:
+            qty_val = float(quantity)
+            qty_str = str(int(qty_val)) if qty_val.is_integer() else str(qty_val)
+        except (ValueError, TypeError):
+            qty_str = str(quantity)
+
         payload = {
             "symbol": symbol,
             "side": side.upper(),
             "type": "MARKET",
             "positionSide": position_side.upper(),
-            "quantity": str(quantity),
+            "quantity": qty_str,
             "newClientOrderId": cid
         }
 
-        if tp_price and tp_price > 0:
-            payload["tpTriggerPrice"] = str(tp_price)
-            payload["tpWorkingType"] = "MARK_PRICE"
+        # Defensively handle tp_price (can be float, int, str, or None)
+        if tp_price is not None:
+            try:
+                if float(tp_price) > 0:
+                    payload["tpTriggerPrice"] = str(tp_price)
+                    payload["tpWorkingType"] = "MARK_PRICE"
+            except (ValueError, TypeError):
+                pass
 
-        if sl_price and sl_price > 0:
-            payload["slTriggerPrice"] = str(sl_price)
-            payload["slWorkingType"] = "MARK_PRICE"
+        # Defensively handle sl_price (can be float, int, str, or None)
+        if sl_price is not None:
+            try:
+                if float(sl_price) > 0:
+                    payload["slTriggerPrice"] = str(sl_price)
+                    payload["slWorkingType"] = "MARK_PRICE"
+            except (ValueError, TypeError):
+                pass
 
         res = self.request("POST", "/capi/v3/order", payload)
-        data = res.get("data", res)
+        data = res.get("data", res) if isinstance(res, dict) else {}
+        order_id = ""
+        if isinstance(data, dict) and data.get("orderId"):
+            order_id = str(data["orderId"])
+        elif isinstance(res, dict) and res.get("orderId"):
+            order_id = str(res["orderId"])
 
-        is_success = res.get("code") in (0, "0", 200, "200") or data.get("success", False) or bool(data.get("orderId"))
+        code = str(res.get("code", "")) if isinstance(res, dict) else ""
+        is_success = (
+            code in ("0", "00000", "200")
+            or (isinstance(data, dict) and data.get("success", False))
+            or bool(order_id)
+        )
         return {
             "success": is_success,
-            "orderId": str(data.get("orderId", "")),
+            "orderId": order_id,
             "clientOrderId": cid,
             "raw": res
         }
