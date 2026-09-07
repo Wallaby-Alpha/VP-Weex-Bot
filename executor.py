@@ -38,30 +38,44 @@ class TradeExecutor:
 
     def execute_signal(self, signal: Dict[str, Any]) -> bool:
         symbol = signal["symbol"]
+        weex_symbol = signal.get("weex_symbol", symbol)
+        multiplier = float(signal.get("multiplier", 1.0))
         side = signal["side"]
 
         # 1. Circuit breaker guard
-        if self.state_mgr.is_coin_frozen(symbol):
-            logger.info(f"Skipping {symbol}: Currently frozen by circuit breaker.")
+        if self.state_mgr.is_coin_frozen(symbol) or self.state_mgr.is_coin_frozen(weex_symbol):
+            logger.info(f"Skipping {symbol} ({weex_symbol}): Currently frozen by circuit breaker.")
             return False
 
         # 2. Duplicate position guard
-        if self.state_mgr.has_open_position(symbol):
-            logger.info(f"Skipping {symbol}: Already holding an open position.")
+        if self.state_mgr.has_open_position(symbol) or self.state_mgr.has_open_position(weex_symbol):
+            logger.info(f"Skipping {symbol} ({weex_symbol}): Already holding an open position.")
             return False
 
-        # 3. Retrieve symbol precision specs
-        meta = self.symbol_metadata.get(symbol, {
+        # 3. Retrieve symbol precision specs using weex_symbol
+        meta = self.symbol_metadata.get(weex_symbol, self.symbol_metadata.get(symbol, {
             "pricePrecision": 4,
             "quantityPrecision": 2,
             "minOrderSize": 0.001
-        })
+        }))
         price_prec = int(meta.get("pricePrecision", 4))
         qty_prec = int(meta.get("quantityPrecision", 2))
         min_qty = float(meta.get("minOrderSize", 0.001))
 
-        # 4. Position Sizing
-        entry_price = float(signal["entry_price"])
+        # 4. Position Sizing & Price Scaling
+        mexc_entry = float(signal["entry_price"])
+        try:
+            weex_mark = self.weex.get_mark_price(weex_symbol)
+        except Exception:
+            weex_mark = None
+
+        if weex_mark and weex_mark > 0 and mexc_entry > 0:
+            scale_ratio = weex_mark / mexc_entry
+            entry_price = weex_mark
+        else:
+            scale_ratio = multiplier
+            entry_price = mexc_entry * multiplier
+
         available_balance = self.weex.get_available_margin()
         if available_balance <= 0:
             available_balance = 1000.0  # Safe simulation baseline for dry-run
@@ -79,11 +93,11 @@ class TradeExecutor:
         if qty_prec == 0 or quantity.is_integer():
             quantity = int(quantity)
 
-        # Format TP & SL to price precision
+        # Format TP & SL to price precision using the scale ratio
         tp_raw = signal.get("take_profit")
         sl_raw = signal.get("stop_loss")
-        tp_price = round(float(tp_raw), price_prec) if tp_raw is not None else None
-        sl_price = round(float(sl_raw), price_prec) if sl_raw is not None else None
+        tp_price = round(float(tp_raw) * scale_ratio, price_prec) if tp_raw is not None else None
+        sl_price = round(float(sl_raw) * scale_ratio, price_prec) if sl_raw is not None else None
         if price_prec == 0:
             if tp_price is not None:
                 tp_price = int(tp_price)
@@ -92,6 +106,7 @@ class TradeExecutor:
 
         trade_record = {
             "symbol": symbol,
+            "weex_symbol": weex_symbol,
             "side": side,
             "timeframe": config.TIMEFRAME,
             "entry_price": entry_price,
@@ -108,22 +123,22 @@ class TradeExecutor:
 
         # 5. Execution
         if config.DRY_RUN:
-            logger.info(f"[DRY-RUN] Simulating {side} order on {symbol}: Qty={quantity}, TP={tp_price}, SL={sl_price}")
+            logger.info(f"[DRY-RUN] Simulating {side} order on {weex_symbol}: Qty={quantity}, TP={tp_price}, SL={sl_price}")
             self.state_mgr.record_position_open(symbol, trade_record)
             self.notifier.notify_trade_signal(trade_record)
             return True
 
         # LIVE EXECUTION ON WEEX
         try:
-            # Configure leverage
-            self.weex.set_leverage(symbol, config.DEFAULT_LEVERAGE)
+            # Configure leverage on WEEX using weex_symbol
+            self.weex.set_leverage(weex_symbol, config.DEFAULT_LEVERAGE)
 
             # WEEX order side: BUY for LONG, SELL for SHORT
             order_side = "BUY" if side == "LONG" else "SELL"
             pos_side = "LONG" if side == "LONG" else "SHORT"
 
             res = self.weex.place_order_with_tpsl(
-                symbol=symbol,
+                symbol=weex_symbol,
                 side=order_side,
                 position_side=pos_side,
                 quantity=quantity,
@@ -133,18 +148,18 @@ class TradeExecutor:
 
             if res.get("success"):
                 trade_record["order_id"] = res.get("orderId")
-                logger.info(f"LIVE WEEX ORDER PLACED for {symbol}: OrderId={res.get('orderId')}")
+                logger.info(f"LIVE WEEX ORDER PLACED for {weex_symbol}: OrderId={res.get('orderId')}")
                 self.state_mgr.record_position_open(symbol, trade_record)
                 self.notifier.notify_trade_signal(trade_record)
                 return True
             else:
-                err_msg = f"WEEX order submission failed for {symbol}: {res.get('raw')}"
+                err_msg = f"WEEX order submission failed for {weex_symbol}: {res.get('raw')}"
                 logger.error(err_msg)
                 self.notifier.notify_error(err_msg)
                 return False
 
         except Exception as e:
-            err_msg = f"Fatal execution exception on {symbol}: {e}"
+            err_msg = f"Fatal execution exception on {weex_symbol}: {e}"
             logger.error(err_msg, exc_info=True)
             self.notifier.notify_error(err_msg)
             return False
