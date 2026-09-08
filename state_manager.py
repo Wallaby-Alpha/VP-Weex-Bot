@@ -106,3 +106,53 @@ class StateManager:
 
     def has_open_position(self, symbol: str) -> bool:
         return symbol in self.state.get("active_positions", {})
+
+    def get_active_positions_count(self) -> int:
+        return len(self.state.get("active_positions", {}))
+
+    def sync_with_exchange(self, weex_client, notifier=None):
+        """
+        Synchronizes state with actual open contract positions on WEEX.
+        When a position hits TP or SL on WEEX, it automatically closes on the exchange.
+        This detects the closure, archives the trade, notifies Telegram, and frees the concurrent trade slot.
+        """
+        try:
+            live_positions = weex_client.get_active_positions()
+            live_symbols = set()
+            for p in live_positions:
+                sym = p.get("symbol", "")
+                if sym:
+                    live_symbols.add(sym)
+                    # Support matching with/without 1000 prefix
+                    if sym.startswith("1000"):
+                        live_symbols.add(sym[4:])
+                    else:
+                        live_symbols.add(f"1000{sym}")
+
+            current_local = dict(self.state.get("active_positions", {}))
+            for sym, pos_data in current_local.items():
+                weex_sym = pos_data.get("weex_symbol", sym)
+                # If neither the base symbol nor weex_symbol exists in active positions on WEEX:
+                if sym not in live_symbols and weex_sym not in live_symbols:
+                    logger.info(f"Position {sym} ({weex_sym}) closed on WEEX (TP/SL triggered). Clearing slot.")
+                    self.record_position_close(sym, exit_reason="TP/SL_TRIGGERED_ON_EXCHANGE")
+                    if notifier:
+                        notifier.notify_trade_closed(sym, exit_reason="TP/SL Hit on WEEX")
+
+        except Exception as e:
+            logger.warning(f"Could not synchronize positions with WEEX: {e}")
+
+    def sync_dry_run_positions(self, notifier=None):
+        """
+        In dry-run mode, expires simulated positions that exceed MAX_HOLDING_BARS (4 hours).
+        """
+        current_local = dict(self.state.get("active_positions", {}))
+        max_duration = config.MAX_HOLDING_BARS * 300  # 4 hours
+        now = time.time()
+        for sym, pos_data in current_local.items():
+            opened_at = pos_data.get("timestamp", now)
+            if now - opened_at > max_duration:
+                logger.info(f"[DRY-RUN] Holding duration exceeded for {sym}. Closing simulated position.")
+                self.record_position_close(sym, exit_reason="MAX_HOLDING_EXPIRED")
+                if notifier:
+                    notifier.notify_trade_closed(sym, exit_reason="Max Holding Expired (Dry-Run)")

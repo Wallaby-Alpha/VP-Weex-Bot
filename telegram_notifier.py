@@ -90,3 +90,12 @@ class TelegramNotifier:
     def notify_error(self, err_text: str):
         msg = f"🚨 <b>BOT ERROR ALERT</b>\n<code>{err_text}</code>"
         self.send_message(msg)
+
+    def notify_trade_closed(self, symbol: str, exit_reason: str = "CLOSED"):
+        msg = (
+            f"🏁 <b>TRADE CLOSED: #{symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Status:</b> Position finalized ({exit_reason})\n"
+            f"<b>Concurrent Slots:</b> Slot freed up for next setup."
+        )
+        self.send_message(msg)

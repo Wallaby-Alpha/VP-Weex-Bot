@@ -54,12 +54,18 @@ class TradeExecutor:
             logger.warning(f"Skipping {symbol} ({weex_symbol}): Token is listed on WEEX web/app but disabled for API trading by WEEX.")
             return False
 
-        # 1. Circuit breaker guard
+        # 1. Concurrent positions limit guard
+        active_count = self.state_mgr.get_active_positions_count()
+        if active_count >= config.MAX_CONCURRENT_TRADES:
+            logger.info(f"Skipping {symbol} ({weex_symbol}): Max concurrent positions limit ({config.MAX_CONCURRENT_TRADES}) reached ({active_count} active).")
+            return False
+
+        # 2. Circuit breaker guard
         if self.state_mgr.is_coin_frozen(symbol) or self.state_mgr.is_coin_frozen(weex_symbol):
             logger.info(f"Skipping {symbol} ({weex_symbol}): Currently frozen by circuit breaker.")
             return False
 
-        # 2. Duplicate position guard
+        # 3. Duplicate position guard
         if self.state_mgr.has_open_position(symbol) or self.state_mgr.has_open_position(weex_symbol):
             logger.info(f"Skipping {symbol} ({weex_symbol}): Already holding an open position.")
             return False

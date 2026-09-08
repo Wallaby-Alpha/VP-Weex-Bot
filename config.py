@@ -17,6 +17,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 DRY_RUN = os.getenv("DRY_RUN", "True").lower() in ("true", "1", "yes")
 POSITION_SIZE_PCT = float(os.getenv("POSITION_SIZE_PCT", "0.10"))  # 10% of balance per trade
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "3"))        # 3x isolated leverage
+MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", "2"))  # Max simultaneous active positions
 
 # --- 5-Minute Volume Profile Strategy Parameters ---
 TIMEFRAME = "5m"

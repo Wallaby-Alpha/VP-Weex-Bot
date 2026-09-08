@@ -46,12 +46,19 @@ def main():
     scanner = MarketScanner()
     executor = TradeExecutor(weex_client, notifier, state_mgr)
 
+    # Synchronize state with WEEX active positions on startup
+    if not config.DRY_RUN:
+        state_mgr.sync_with_exchange(weex_client, notifier)
+    else:
+        state_mgr.sync_dry_run_positions(notifier)
+
     # Initial universe and balance check
     universe = scanner.get_target_universe(max_pairs=config.MAX_PAIRS)
     balance = weex_client.get_available_margin()
 
     logger.info(f"Initial USDT Balance: ${balance:,.2f}")
     logger.info(f"Loaded Universe of {len(universe)} symbols.")
+    logger.info(f"Concurrent Trades Limit: {config.MAX_CONCURRENT_TRADES} (Active: {state_mgr.get_active_positions_count()})")
     notifier.notify_startup(universe, config.DRY_RUN, balance)
 
     last_universe_refresh = time.time()
@@ -60,6 +67,22 @@ def main():
         try:
             # Synchronize to the close of each 5m candle
             wait_until_next_bar(timeframe_sec=300, offset_sec=3)
+
+            # Check for closed positions on WEEX (TP/SL hits) and free slots
+            if not config.DRY_RUN:
+                state_mgr.sync_with_exchange(weex_client, notifier)
+            else:
+                state_mgr.sync_dry_run_positions(notifier)
+
+            # Guard: Only allow MAX_CONCURRENT_TRADES (2) open at the same time
+            active_count = state_mgr.get_active_positions_count()
+            if active_count >= config.MAX_CONCURRENT_TRADES:
+                active_syms = list(state_mgr.state.get("active_positions", {}).keys())
+                logger.info(
+                    f"Max concurrent trades reached ({active_count}/{config.MAX_CONCURRENT_TRADES}: {active_syms}). "
+                    f"Waiting for an existing position to close before scanning new setups."
+                )
+                continue
 
             scan_start = time.time()
             logger.info("--- Starting 5m Candle Scan Cycle ---")
