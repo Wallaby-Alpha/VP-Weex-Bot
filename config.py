@@ -38,9 +38,9 @@ MAX_CONSECUTIVE_LOSSES = 2
 CIRCUIT_BREAKER_FREEZE_BARS = 24  # Freeze coin for 2 hours on 2 losses
 
 # --- Universe Screener (Top 200 by Volume) ---
-MIN_24H_VOLUME_USD = 1_000_000        # Minimum $1M 24h volume
-MAX_24H_VOLUME_USD = float("inf")     # No upper cap: captures top high-volume movers
-MAX_PAIRS = 200                       # Scan top 200 coins
+MIN_24H_VOLUME_USD = float(os.getenv("MIN_24H_VOLUME_USD", "50000"))  # Minimum $50k 24h volume
+MAX_24H_VOLUME_USD = float(os.getenv("MAX_24H_VOLUME_USD", "inf"))    # No upper cap: captures top high-volume movers
+MAX_PAIRS = int(os.getenv("MAX_PAIRS", "200"))                        # Scan top 200 coins
 
 # Blacklist: Non-viable meme tokens and BTC-slaved dinosaur coins
 EXCLUDED_SUBSTRINGS = [
