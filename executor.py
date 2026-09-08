@@ -27,6 +27,7 @@ class TradeExecutor:
         self.notifier = notifier
         self.state_mgr = state_mgr
         self.symbol_metadata = {}
+        self.api_trading_symbols = set()
         self.load_metadata()
 
     def load_metadata(self):
@@ -36,11 +37,22 @@ class TradeExecutor:
         except Exception as e:
             logger.warning(f"Could not load WEEX exchangeInfo: {e}")
 
+        try:
+            self.api_trading_symbols = self.weex.get_api_trading_symbols()
+            logger.info(f"Loaded {len(self.api_trading_symbols)} API-permitted trading symbols.")
+        except Exception as e:
+            logger.warning(f"Could not load WEEX apiTradingSymbols: {e}")
+
     def execute_signal(self, signal: Dict[str, Any]) -> bool:
         symbol = signal["symbol"]
         weex_symbol = signal.get("weex_symbol", symbol)
         multiplier = float(signal.get("multiplier", 1.0))
         side = signal["side"]
+
+        # 0. API Trading Permission guard
+        if self.api_trading_symbols and weex_symbol not in self.api_trading_symbols:
+            logger.warning(f"Skipping {symbol} ({weex_symbol}): Token is listed on WEEX web/app but disabled for API trading by WEEX.")
+            return False
 
         # 1. Circuit breaker guard
         if self.state_mgr.is_coin_frozen(symbol) or self.state_mgr.is_coin_frozen(weex_symbol):
@@ -153,9 +165,14 @@ class TradeExecutor:
                 self.notifier.notify_trade_signal(trade_record)
                 return True
             else:
-                err_msg = f"WEEX order submission failed for {weex_symbol}: {res.get('raw')}"
-                logger.error(err_msg)
-                self.notifier.notify_error(err_msg)
+                raw = res.get("raw", {})
+                code = raw.get("code") if isinstance(raw, dict) else None
+                if code in (-1058, "-1058"):
+                    logger.warning(f"WEEX order skipped: {weex_symbol} is not supported for API trading on WEEX.")
+                else:
+                    err_msg = f"WEEX order submission failed for {weex_symbol}: {raw}"
+                    logger.error(err_msg)
+                    self.notifier.notify_error(err_msg)
                 return False
 
         except Exception as e:

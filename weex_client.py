@@ -126,6 +126,14 @@ class WeexClient:
                 }
         return metadata
 
+    def get_api_trading_symbols(self) -> set:
+        """
+        Fetches official set of symbols permitted for trading via the API.
+        """
+        res = self.request("GET", "/capi/v3/market/apiTradingSymbols", is_public=True)
+        raw = res if isinstance(res, list) else (res.get("data", []) if isinstance(res, dict) else [])
+        return set(raw)
+
     def get_mark_price(self, symbol: str) -> float:
         """
         Fetches current mark price for a symbol.
