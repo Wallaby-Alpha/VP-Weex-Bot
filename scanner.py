@@ -6,7 +6,13 @@ import pandas as pd
 import numpy as np
 
 import config
-from vp_engine import calculate_atr, calculate_rsi, compute_vp_levels
+from vp_engine import (
+    calculate_atr,
+    calculate_rsi,
+    compute_vp_levels,
+    compute_session_profiles,
+    evaluate_reclaim
+)
 
 logger = logging.getLogger("SCANNER")
 MEXC_BASE_URL = "https://api.mexc.com"
@@ -143,41 +149,183 @@ class MarketScanner:
     def evaluate_signal(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
         Evaluates the latest completed 5-minute candle against the strategy logic:
-        1. Confirmed trap re-entry above VAL (Long) or below VAH (Short)
-        2. RSI exhaustion check
-        3. Minimum 1.00% target move to POC
-        4. Risk / Reward >= 1.40
+        When REQUIRE_SESSION_CONFLUENCE is True:
+          - Calculates institutional Volume Profiles for both New York and Asia sessions.
+          - Requires both sessions to confirm a trap reclaim in the EXACT SAME direction.
+          - Targets the nearest institutional POC hurdle (min 1.00% profit hurdle).
+          - Sets stop-loss beyond recent sweep extremes with dynamic ATR buffer.
         """
-        df = self.fetch_recent_klines(symbol, limit=config.LOOKBACK_BARS + 30)
-        if len(df) < config.LOOKBACK_BARS + 15:
+        limit = config.KLINE_FETCH_LIMIT if config.REQUIRE_SESSION_CONFLUENCE else (config.LOOKBACK_BARS + 30)
+        df = self.fetch_recent_klines(symbol, limit=limit)
+        if len(df) < (100 if config.REQUIRE_SESSION_CONFLUENCE else (config.LOOKBACK_BARS + 15)):
             return None
 
         df["atr"] = calculate_atr(df, config.ATR_PERIOD)
         df["rsi"] = calculate_rsi(df["close"], config.RSI_PERIOD)
 
-        # Look at the most recently CLOSED candle (index -2) and previous (index -3)
-        # (index -1 is the currently open/unclosed bar)
+        # Most recently closed candle (index -2) and preceding candle (index -3)
         curr_bar = df.iloc[-2]
         prev_bar = df.iloc[-3]
 
         c_price = float(curr_bar["close"])
         prev_price = float(prev_bar["close"])
+        curr_low = float(curr_bar["low"])
+        curr_high = float(curr_bar["high"])
+        prev_low = float(prev_bar["low"])
+        prev_high = float(prev_bar["high"])
+
         c_atr = float(curr_bar["atr"])
         c_rsi = float(curr_bar["rsi"])
 
         if np.isnan(c_atr) or np.isnan(c_rsi) or c_atr <= 0:
             return None
 
-        # Slice rolling lookback window up to current closed candle
+        # Resolve mapping to WEEX API symbol
+        resolved = self.resolve_symbol(symbol)
+        weex_symbol, multiplier = resolved if resolved else (symbol, 1.0)
+
+        # =========================================================================
+        # 1. DUAL-SESSION CONFLUENCE STRATEGY (NY Session + Asia Session Agreement)
+        # =========================================================================
+        if config.REQUIRE_SESSION_CONFLUENCE:
+            profiles = compute_session_profiles(df, config.NUM_BINS, config.VAL_PCT)
+            if not profiles or "ny" not in profiles or "asia" not in profiles:
+                return None
+
+            ny_p = profiles["ny"]
+            asia_p = profiles["asia"]
+
+            # Evaluate reclaim on NY profile
+            sig_ny = evaluate_reclaim(
+                c_price=c_price,
+                prev_price=prev_price,
+                curr_low=curr_low,
+                curr_high=curr_high,
+                prev_low=prev_low,
+                prev_high=prev_high,
+                vah=ny_p["vah"],
+                val=ny_p["val"],
+                c_rsi=c_rsi,
+                rsi_long_max=config.RSI_LONG_MAX,
+                rsi_short_min=config.RSI_SHORT_MIN
+            )
+
+            # Evaluate reclaim on Asia profile
+            sig_asia = evaluate_reclaim(
+                c_price=c_price,
+                prev_price=prev_price,
+                curr_low=curr_low,
+                curr_high=curr_high,
+                prev_low=prev_low,
+                prev_high=prev_high,
+                vah=asia_p["vah"],
+                val=asia_p["val"],
+                c_rsi=c_rsi,
+                rsi_long_max=config.RSI_LONG_MAX,
+                rsi_short_min=config.RSI_SHORT_MIN
+            )
+
+            # Strict Confluence Filter: Both sessions must agree on reclaim direction
+            if not sig_ny or not sig_asia or (sig_ny != sig_asia):
+                # Disagreeing or single-session signals are filtered out
+                return None
+
+            side = sig_ny  # "LONG" or "SHORT"
+
+            if side == "LONG":
+                # Take Profit: Target nearest institutional POC above entry price
+                eligible_pocs = [p for p in [ny_p["poc"], asia_p["poc"]] if p > c_price]
+                if not eligible_pocs:
+                    return None
+                target_poc = min(eligible_pocs)
+
+                reward = target_poc - c_price
+                reward_pct = (reward / c_price) * 100
+                if (reward / c_price) < config.MIN_TARGET_PCT:
+                    return None
+
+                sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * 0.002)
+                sweep_low = min(curr_low, prev_low)
+                stop_loss = min(c_price - sl_buffer, sweep_low * 0.9985)
+                risk = c_price - stop_loss
+                risk_pct = (risk / c_price) * 100
+                rr = reward / risk if risk > 0 else 0
+
+                if risk <= 0 or rr < config.MIN_RR:
+                    return None
+
+                return {
+                    "symbol": symbol,
+                    "weex_symbol": weex_symbol,
+                    "multiplier": multiplier,
+                    "side": "LONG",
+                    "timeframe": config.TIMEFRAME,
+                    "entry_price": c_price,
+                    "stop_loss": stop_loss,
+                    "take_profit": target_poc,
+                    "risk_pct": risk_pct,
+                    "reward_pct": reward_pct,
+                    "rr": rr,
+                    "rsi": c_rsi,
+                    "confluence": "NY + Asia Agreement",
+                    "ny_levels": ny_p,
+                    "asia_levels": asia_p,
+                    "val": min(ny_p["val"], asia_p["val"]),
+                    "vah": max(ny_p["vah"], asia_p["vah"]),
+                    "poc": target_poc
+                }
+
+            elif side == "SHORT":
+                # Take Profit: Target nearest institutional POC below entry price
+                eligible_pocs = [p for p in [ny_p["poc"], asia_p["poc"]] if p < c_price]
+                if not eligible_pocs:
+                    return None
+                target_poc = max(eligible_pocs)
+
+                reward = c_price - target_poc
+                reward_pct = (reward / c_price) * 100
+                if (reward / c_price) < config.MIN_TARGET_PCT:
+                    return None
+
+                sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * 0.002)
+                sweep_high = max(curr_high, prev_high)
+                stop_loss = max(c_price + sl_buffer, sweep_high * 1.0015)
+                risk = stop_loss - c_price
+                risk_pct = (risk / c_price) * 100
+                rr = reward / risk if risk > 0 else 0
+
+                if risk <= 0 or rr < config.MIN_RR:
+                    return None
+
+                return {
+                    "symbol": symbol,
+                    "weex_symbol": weex_symbol,
+                    "multiplier": multiplier,
+                    "side": "SHORT",
+                    "timeframe": config.TIMEFRAME,
+                    "entry_price": c_price,
+                    "stop_loss": stop_loss,
+                    "take_profit": target_poc,
+                    "risk_pct": risk_pct,
+                    "reward_pct": reward_pct,
+                    "rr": rr,
+                    "rsi": c_rsi,
+                    "confluence": "NY + Asia Agreement",
+                    "ny_levels": ny_p,
+                    "asia_levels": asia_p,
+                    "val": min(ny_p["val"], asia_p["val"]),
+                    "vah": max(ny_p["vah"], asia_p["vah"]),
+                    "poc": target_poc
+                }
+
+        # =========================================================================
+        # 2. FALLBACK: ROLLING LOOKBACK WINDOW (If Confluence explicitly disabled)
+        # =========================================================================
         sub_df = df.iloc[-config.LOOKBACK_BARS - 2:-2]
         vah, val, poc = compute_vp_levels(sub_df, config.NUM_BINS, config.VAL_PCT)
 
         if vah is None or val is None or poc is None:
             return None
-
-        # Resolve mapping to WEEX API symbol
-        resolved = self.resolve_symbol(symbol)
-        weex_symbol, multiplier = resolved if resolved else (symbol, 1.0)
 
         # --- LONG TRIGGER ---
         if prev_price <= val and c_price > val and c_rsi <= config.RSI_LONG_MAX:
@@ -242,3 +390,4 @@ class MarketScanner:
                     }
 
         return None
+

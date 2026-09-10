@@ -34,6 +34,16 @@ RSI_PERIOD = 14
 RSI_LONG_MAX = 46.0         # Must be recovering from oversold
 RSI_SHORT_MIN = 54.0        # Must be exhausting from overbought
 
+# --- Session Confluence Strategy Settings ---
+REQUIRE_SESSION_CONFLUENCE = os.getenv("REQUIRE_SESSION_CONFLUENCE", "True").lower() in ("true", "1", "yes")
+NY_SESSION_OPEN = "09:30:00"
+NY_SESSION_CLOSE = "16:00:00"
+NY_TIMEZONE = "America/New_York"
+ASIA_SESSION_OPEN = "00:00:00"
+ASIA_SESSION_CLOSE = "08:00:00"
+ASIA_TIMEZONE = "UTC"
+KLINE_FETCH_LIMIT = 500     # Sufficient bars to encompass completed NY and Asia sessions
+
 # --- Risk Circuit Breaker ---
 MAX_CONSECUTIVE_LOSSES = 2
 CIRCUIT_BREAKER_FREEZE_BARS = 24  # Freeze coin for 2 hours on 2 losses
