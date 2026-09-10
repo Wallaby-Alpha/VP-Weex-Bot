@@ -118,11 +118,11 @@ def compute_session_profiles(
         latest_bar_ny = df_ny["ny_time"].iloc[-1]
         if latest_bar_ny.dayofweek >= 5:  # Weekend: locks to Friday's completed NY
             target_ny = ny_days[-1]
-        elif latest_bar_ny.time() < t_ny_close:
-            # Today's NY session still developing (or not started yet), use previous completed
+        elif ny_days[-1] == latest_bar_ny.date() and latest_bar_ny.time() < t_ny_close:
+            # Today's NY session is in the data but still developing, use previous completed
             target_ny = ny_days[-2] if len(ny_days) >= 2 else ny_days[-1]
         else:
-            # Today's NY session has closed, use today's completed session
+            # Today's NY session has closed, or hasn't started yet so the last day in list is already completed
             target_ny = ny_days[-1]
 
         ny_slice = df_ny[ny_mask & (df_ny["ny_date"] == target_ny)]
@@ -148,11 +148,11 @@ def compute_session_profiles(
 
     if asia_days:
         latest_bar_utc = df["timestamp"].iloc[-1]
-        if latest_bar_utc.time() < t_asia_close:
+        if asia_days[-1] == latest_bar_utc.date() and latest_bar_utc.time() < t_asia_close:
             # Today's Asia session still developing, use previous completed
             target_asia = asia_days[-2] if len(asia_days) >= 2 else asia_days[-1]
         else:
-            # Today's Asia session has closed, use today's completed session
+            # Today's Asia session has closed, or hasn't started yet
             target_asia = asia_days[-1]
 
         asia_slice = df_asia[asia_mask & (df_asia["utc_date"] == target_asia)]
