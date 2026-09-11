@@ -185,56 +185,51 @@ class MarketScanner:
         weex_symbol, multiplier = resolved if resolved else (symbol, 1.0)
 
         # =========================================================================
-        # 1. DUAL-SESSION CONFLUENCE STRATEGY (NY Session + Asia Session Agreement)
+        # 1. DUAL-SESSION CONFLUENCE STRATEGY (Flexible Profile Agreement)
         # =========================================================================
         if config.REQUIRE_SESSION_CONFLUENCE:
             profiles = compute_session_profiles(df, config.NUM_BINS, config.VAL_PCT)
-            if not profiles or "ny" not in profiles or "asia" not in profiles:
-                return None
+            ny_p = profiles.get("ny")
+            asia_p = profiles.get("asia")
 
-            ny_p = profiles["ny"]
-            asia_p = profiles["asia"]
-
-            # Evaluate reclaim on NY profile
             sig_ny = evaluate_reclaim(
-                c_price=c_price,
-                prev_price=prev_price,
-                curr_low=curr_low,
-                curr_high=curr_high,
-                prev_low=prev_low,
-                prev_high=prev_high,
-                vah=ny_p["vah"],
-                val=ny_p["val"],
-                c_rsi=c_rsi,
-                rsi_long_max=config.RSI_LONG_MAX,
-                rsi_short_min=config.RSI_SHORT_MIN
-            )
+                c_price=c_price, prev_price=prev_price, curr_low=curr_low, curr_high=curr_high,
+                prev_low=prev_low, prev_high=prev_high, vah=ny_p["vah"], val=ny_p["val"],
+                c_rsi=c_rsi, rsi_long_max=config.RSI_LONG_MAX, rsi_short_min=config.RSI_SHORT_MIN
+            ) if ny_p else None
 
-            # Evaluate reclaim on Asia profile
             sig_asia = evaluate_reclaim(
-                c_price=c_price,
-                prev_price=prev_price,
-                curr_low=curr_low,
-                curr_high=curr_high,
-                prev_low=prev_low,
-                prev_high=prev_high,
-                vah=asia_p["vah"],
-                val=asia_p["val"],
-                c_rsi=c_rsi,
-                rsi_long_max=config.RSI_LONG_MAX,
-                rsi_short_min=config.RSI_SHORT_MIN
-            )
+                c_price=c_price, prev_price=prev_price, curr_low=curr_low, curr_high=curr_high,
+                prev_low=prev_low, prev_high=prev_high, vah=asia_p["vah"], val=asia_p["val"],
+                c_rsi=c_rsi, rsi_long_max=config.RSI_LONG_MAX, rsi_short_min=config.RSI_SHORT_MIN
+            ) if asia_p else None
 
-            # Strict Confluence Filter: Both sessions must agree on reclaim direction
-            if not sig_ny or not sig_asia or (sig_ny != sig_asia):
-                # Disagreeing or single-session signals are filtered out
+            # Fallback/supplementary check against rolling lookback profile
+            sub_df = df.iloc[-config.LOOKBACK_BARS - 2:-2]
+            r_vah, r_val, r_poc = compute_vp_levels(sub_df, config.NUM_BINS, config.VAL_PCT)
+            sig_roll = None
+            if r_val is not None and r_vah is not None:
+                if (prev_price <= r_val or curr_low <= r_val or prev_low <= r_val) and (c_price > r_val) and (c_price < r_vah) and (c_rsi <= config.RSI_LONG_MAX):
+                    sig_roll = "LONG"
+                elif (prev_price >= r_vah or curr_high >= r_vah or prev_high >= r_vah) and (c_price < r_vah) and (c_price > r_val) and (c_rsi >= config.RSI_SHORT_MIN):
+                    sig_roll = "SHORT"
+
+            # Determine trigger side: at least one profile must signal a reclaim, and no conflicting signals
+            detected_sides = {s for s in [sig_ny, sig_asia, sig_roll] if s is not None}
+            if len(detected_sides) != 1:
+                # Either no signal triggered, or conflicting signals (e.g., LONG on NY vs SHORT on Asia)
                 return None
 
-            side = sig_ny  # "LONG" or "SHORT"
+            side = list(detected_sides)[0]
+
+            # Gather all valid institutional POC targets
+            all_pocs = []
+            if ny_p: all_pocs.append(ny_p["poc"])
+            if asia_p: all_pocs.append(asia_p["poc"])
+            if r_poc: all_pocs.append(r_poc)
 
             if side == "LONG":
-                # Take Profit: Target nearest institutional POC above entry price
-                eligible_pocs = [p for p in [ny_p["poc"], asia_p["poc"]] if p > c_price]
+                eligible_pocs = [p for p in all_pocs if p > c_price]
                 if not eligible_pocs:
                     return None
                 target_poc = min(eligible_pocs)
@@ -267,17 +262,16 @@ class MarketScanner:
                     "reward_pct": reward_pct,
                     "rr": rr,
                     "rsi": c_rsi,
-                    "confluence": "NY + Asia Agreement",
+                    "confluence": f"Profile Reclaim ({' + '.join([k for k, v in [('NY', sig_ny), ('Asia', sig_asia), ('Rolling', sig_roll)] if v])})",
                     "ny_levels": ny_p,
                     "asia_levels": asia_p,
-                    "val": min(ny_p["val"], asia_p["val"]),
-                    "vah": max(ny_p["vah"], asia_p["vah"]),
+                    "val": min([p["val"] for p in [ny_p, asia_p] if p] or [r_val]),
+                    "vah": max([p["vah"] for p in [ny_p, asia_p] if p] or [r_vah]),
                     "poc": target_poc
                 }
 
             elif side == "SHORT":
-                # Take Profit: Target nearest institutional POC below entry price
-                eligible_pocs = [p for p in [ny_p["poc"], asia_p["poc"]] if p < c_price]
+                eligible_pocs = [p for p in all_pocs if p < c_price]
                 if not eligible_pocs:
                     return None
                 target_poc = max(eligible_pocs)
@@ -310,11 +304,11 @@ class MarketScanner:
                     "reward_pct": reward_pct,
                     "rr": rr,
                     "rsi": c_rsi,
-                    "confluence": "NY + Asia Agreement",
+                    "confluence": f"Profile Reclaim ({' + '.join([k for k, v in [('NY', sig_ny), ('Asia', sig_asia), ('Rolling', sig_roll)] if v])})",
                     "ny_levels": ny_p,
                     "asia_levels": asia_p,
-                    "val": min(ny_p["val"], asia_p["val"]),
-                    "vah": max(ny_p["vah"], asia_p["vah"]),
+                    "val": min([p["val"] for p in [ny_p, asia_p] if p] or [r_val]),
+                    "vah": max([p["vah"] for p in [ny_p, asia_p] if p] or [r_vah]),
                     "poc": target_poc
                 }
 
