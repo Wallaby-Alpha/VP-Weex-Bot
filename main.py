@@ -43,7 +43,7 @@ def main():
     weex_client = WeexClient()
     notifier = TelegramNotifier()
     state_mgr = StateManager()
-    scanner = MarketScanner()
+    scanner = MarketScanner(weex_client=weex_client)
     executor = TradeExecutor(weex_client, notifier, state_mgr)
 
     # Synchronize state with WEEX active positions on startup

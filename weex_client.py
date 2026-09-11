@@ -152,6 +152,46 @@ class WeexClient:
             return float(mark_price)
         raise ValueError(f"Could not retrieve mark price for {symbol}: {res}")
 
+    def get_funding_rate(self, symbol: str) -> float:
+        """
+        Fetches the current (or last) funding rate for a symbol from premiumIndex.
+        Returns 0.0 on failure so the confluence scorer degrades gracefully.
+        """
+        try:
+            res = self.request("GET", f"/capi/v3/market/premiumIndex?symbol={symbol}", is_public=True)
+            item = res if not isinstance(res, list) else (res[0] if len(res) > 0 else {})
+            if isinstance(res, dict) and "data" in res:
+                item = res["data"]
+                if isinstance(item, list) and len(item) > 0:
+                    item = item[0]
+            rate = item.get("lastFundingRate") or item.get("fundingRate")
+            if rate is not None:
+                return float(rate)
+        except Exception as e:
+            logger.debug(f"Could not fetch funding rate for {symbol}: {e}")
+        return 0.0
+
+    def get_order_book_depth_ratio(self, symbol: str, levels: int = 10) -> float:
+        """
+        Fetches order book and computes bid_total_qty / ask_total_qty for top N levels.
+        Returns 1.0 (neutral) on failure so the confluence scorer degrades gracefully.
+        """
+        try:
+            res = self.request("GET", f"/capi/v3/market/depth?symbol={symbol}&limit={levels}", is_public=True)
+            data = res.get("data", res) if isinstance(res, dict) else res
+            if isinstance(data, dict):
+                bids = data.get("bids", [])
+                asks = data.get("asks", [])
+            else:
+                return 1.0
+            bid_vol = sum(float(b[1]) for b in bids if len(b) >= 2)
+            ask_vol = sum(float(a[1]) for a in asks if len(a) >= 2)
+            if ask_vol > 0:
+                return bid_vol / ask_vol
+        except Exception as e:
+            logger.debug(f"Could not fetch order book depth for {symbol}: {e}")
+        return 1.0
+
     def get_available_margin(self) -> float:
         """
         Fetches available USDT balance in the futures account.

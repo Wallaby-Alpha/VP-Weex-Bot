@@ -47,8 +47,9 @@ class MarketScanner:
     high-conviction Volume Profile mean-reversion setups.
     """
 
-    def __init__(self):
+    def __init__(self, weex_client=None):
         self.session = requests.Session()
+        self.weex_client = weex_client
         self.weex_api_symbols = set()
         self.load_weex_api_symbols()
 
@@ -220,11 +221,15 @@ class MarketScanner:
         # =========================================================================
         profiles = compute_session_profiles(df, config.NUM_BINS, config.VAL_PCT)
         ny_p = profiles.get("ny")
+        asia_p = profiles.get("asia")
 
-        # Use NY session profile if available, otherwise fall back to 6h rolling profile
+        # Priority: NY session > Asia session > 6h rolling fallback
         if ny_p:
             ref_vah, ref_val, ref_poc = ny_p["vah"], ny_p["val"], ny_p["poc"]
             profile_name = ny_p["name"]
+        elif asia_p:
+            ref_vah, ref_val, ref_poc = asia_p["vah"], asia_p["val"], asia_p["poc"]
+            profile_name = asia_p["name"]
         else:
             sub_df = df.iloc[-config.LOOKBACK_BARS - 2:-2]
             ref_vah, ref_val, ref_poc = compute_vp_levels(sub_df, config.NUM_BINS, config.VAL_PCT, curr_price=c_price)
@@ -246,11 +251,25 @@ class MarketScanner:
 
         # --- 2. Scored Directional Confluence Framework (6 Signals, Max 7 Pts, Min 3 Pts) ---
         btc_ret = fetch_btc_12bar_return(self.session)
+
+        # Fetch real funding rate and order book depth from WEEX (graceful fallback to neutral)
+        funding_rate = 0.0
+        depth_ratio = 1.0
+        if self.weex_client:
+            try:
+                funding_rate = self.weex_client.get_funding_rate(weex_symbol)
+            except Exception:
+                pass
+            try:
+                depth_ratio = self.weex_client.get_order_book_depth_ratio(weex_symbol)
+            except Exception:
+                pass
+
         score, breakdown = compute_confluence_score(
             df=df.iloc[:-1],  # Up to closed candle
             side=raw_side,
-            funding_rate=0.0,
-            bid_ask_depth_ratio=1.0,
+            funding_rate=funding_rate,
+            bid_ask_depth_ratio=depth_ratio,
             btc_returns_12=btc_ret
         )
 

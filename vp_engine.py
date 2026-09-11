@@ -231,17 +231,21 @@ def compute_confluence_score(
     prev_bar = df.iloc[-2]
 
     # --- 1. CVD Absorption (2 pts) ---
+    # Reclaim bar (curr) should show delta divergence from the sweep direction.
+    # The sweep bar (prev) made the extreme; the reclaim bar absorbs and reverses.
     curr_delta = (curr_bar["close"] - curr_bar["open"]) / (curr_bar["high"] - curr_bar["low"] + 1e-9) * curr_bar["volume"]
     prev_delta = (prev_bar["close"] - prev_bar["open"]) / (prev_bar["high"] - prev_bar["low"] + 1e-9) * prev_bar["volume"]
 
     if side == "LONG":
-        if (curr_bar["low"] <= prev_bar["low"]) and (curr_delta > 0 or (curr_delta + prev_delta) > 0):
+        # Sweep bar went down (negative delta or made low), reclaim bar shows buying (positive delta)
+        if curr_delta > 0 or (curr_delta + prev_delta) > 0:
             score += 2
             breakdown["CVD Absorption"] = 2
         else:
             breakdown["CVD Absorption"] = 0
     else:  # SHORT
-        if (curr_bar["high"] >= prev_bar["high"]) and (curr_delta < 0 or (curr_delta + prev_delta) < 0):
+        # Sweep bar went up (positive delta or made high), reclaim bar shows selling (negative delta)
+        if curr_delta < 0 or (curr_delta + prev_delta) < 0:
             score += 2
             breakdown["CVD Absorption"] = 2
         else:

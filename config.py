@@ -29,7 +29,7 @@ VAL_PCT = 0.70
 ATR_PERIOD = 14
 ATR_MULT_STOP = 1.6
 MIN_RR = 1.80               # Raised to 1.80 R:R for opposite VA target
-MIN_TARGET_PCT = 0.010      # Require at least 1.00% gross move to target
+MIN_TARGET_PCT = 0.007      # Require at least 0.70% gross move to target
 MAX_HOLDING_BARS = 48       # 4 hours max hold time
 COOLDOWN_BARS = 8           # 40 mins cooldown
 RSI_PERIOD = 14
@@ -50,15 +50,14 @@ MAX_CONSECUTIVE_LOSSES = 2
 CIRCUIT_BREAKER_FREEZE_BARS = 24  # Freeze coin for 2 hours on 2 losses
 
 # --- Universe Screener (Top 200 by Volume) ---
-MIN_24H_VOLUME_USD = float(os.getenv("MIN_24H_VOLUME_USD", "250000"))  # Raised to $250k volume floor
+MIN_24H_VOLUME_USD = float(os.getenv("MIN_24H_VOLUME_USD", "100000"))  # Lowered to $100k volume floor
 MAX_24H_VOLUME_USD = float(os.getenv("MAX_24H_VOLUME_USD", "inf"))     # No upper cap: captures top high-volume movers
 MAX_PAIRS = int(os.getenv("MAX_PAIRS", "200"))                         # Scan top 200 coins
 
-# Blacklist: Non-viable meme tokens and BTC-slaved dinosaur coins
+# Blacklist: Leveraged tokens and BTC-slaved dinosaur coins (meme coins kept — they produce the widest VAs)
 EXCLUDED_SUBSTRINGS = [
     "UP", "DOWN", "3L", "3S", "4L", "4S", "5L", "5S", "BULL", "BEAR", "ONUSDT",
-    "BASECAT", "INU", "PEPE", "SHIB", "MEME", "DOGE", "CAT",
-    "XMR", "DASH", "UNI", "LTC", "BCH"
+    "XMR", "DASH", "LTC", "BCH"
 ]
 FIAT_BASES = ["EUR", "BRL", "TRY", "GBP", "AUD", "RUB", "UAH"]
 STABLECOIN_BASES = ["USD1", "USDC", "TUSD", "FDUSD", "USDP", "BUSD", "DAI", "USDE", "PYUSD", "RLUSD"]
