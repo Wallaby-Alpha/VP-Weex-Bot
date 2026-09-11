@@ -11,11 +11,34 @@ from vp_engine import (
     calculate_rsi,
     compute_vp_levels,
     compute_session_profiles,
-    evaluate_reclaim
+    evaluate_reclaim,
+    compute_confluence_score
 )
 
 logger = logging.getLogger("SCANNER")
 MEXC_BASE_URL = "https://api.mexc.com"
+
+# Cache for BTC 12-bar return to evaluate relative strength
+btc_return_cache = {"timestamp": 0, "return_12": 0.0}
+
+def fetch_btc_12bar_return(session: requests.Session) -> float:
+    now = time.time()
+    if now - btc_return_cache["timestamp"] < 120:
+        return btc_return_cache["return_12"]
+    try:
+        r = session.get(f"{MEXC_BASE_URL}/api/v3/klines", params={"symbol": "BTCUSDT", "interval": config.TIMEFRAME, "limit": 15}, timeout=5)
+        if r.status_code == 200:
+            raw = r.json()
+            if len(raw) >= 13:
+                c12 = float(raw[-1][4])
+                c0 = float(raw[-13][4])
+                ret = (c12 - c0) / (c0 + 1e-9)
+                btc_return_cache["return_12"] = ret
+                btc_return_cache["timestamp"] = now
+                return ret
+    except Exception:
+        pass
+    return btc_return_cache["return_12"]
 
 
 class MarketScanner:
@@ -193,203 +216,132 @@ class MarketScanner:
         weex_symbol, multiplier = resolved if resolved else (symbol, 1.0)
 
         # =========================================================================
-        # 1. DUAL-SESSION CONFLUENCE STRATEGY (Flexible Profile Agreement)
+        # VP-WEEX-BOT V2: NY SESSION VA RECLAIM + SCORED CONFLUENCE STRATEGY
         # =========================================================================
-        if config.REQUIRE_SESSION_CONFLUENCE:
-            profiles = compute_session_profiles(df, config.NUM_BINS, config.VAL_PCT)
-            ny_p = profiles.get("ny")
-            asia_p = profiles.get("asia")
+        profiles = compute_session_profiles(df, config.NUM_BINS, config.VAL_PCT)
+        ny_p = profiles.get("ny")
 
-            sig_ny = evaluate_reclaim(
-                c_price=c_price, prev_price=prev_price, curr_low=curr_low, curr_high=curr_high,
-                prev_low=prev_low, prev_high=prev_high, vah=ny_p["vah"], val=ny_p["val"],
-                c_rsi=c_rsi, rsi_long_max=config.RSI_LONG_MAX, rsi_short_min=config.RSI_SHORT_MIN
-            ) if ny_p else None
-
-            sig_asia = evaluate_reclaim(
-                c_price=c_price, prev_price=prev_price, curr_low=curr_low, curr_high=curr_high,
-                prev_low=prev_low, prev_high=prev_high, vah=asia_p["vah"], val=asia_p["val"],
-                c_rsi=c_rsi, rsi_long_max=config.RSI_LONG_MAX, rsi_short_min=config.RSI_SHORT_MIN
-            ) if asia_p else None
-
-            # Fallback/supplementary check against rolling lookback profile
+        # Use NY session profile if available, otherwise fall back to 6h rolling profile
+        if ny_p:
+            ref_vah, ref_val, ref_poc = ny_p["vah"], ny_p["val"], ny_p["poc"]
+            profile_name = ny_p["name"]
+        else:
             sub_df = df.iloc[-config.LOOKBACK_BARS - 2:-2]
-            r_vah, r_val, r_poc = compute_vp_levels(sub_df, config.NUM_BINS, config.VAL_PCT)
-            sig_roll = None
-            if r_val is not None and r_vah is not None:
-                if (prev_price <= r_val or curr_low <= r_val or prev_low <= r_val) and (c_price > r_val) and (c_price < r_vah) and (c_rsi <= config.RSI_LONG_MAX):
-                    sig_roll = "LONG"
-                elif (prev_price >= r_vah or curr_high >= r_vah or prev_high >= r_vah) and (c_price < r_vah) and (c_price > r_val) and (c_rsi >= config.RSI_SHORT_MIN):
-                    sig_roll = "SHORT"
+            ref_vah, ref_val, ref_poc = compute_vp_levels(sub_df, config.NUM_BINS, config.VAL_PCT, curr_price=c_price)
+            profile_name = "6h Rolling Window"
 
-            # Determine trigger side: at least one profile must signal a reclaim, and no conflicting signals
-            detected_sides = {s for s in [sig_ny, sig_asia, sig_roll] if s is not None}
-            if len(detected_sides) != 1:
-                # Either no signal triggered, or conflicting signals (e.g., LONG on NY vs SHORT on Asia)
-                return None
-
-            side = list(detected_sides)[0]
-
-            # Gather all valid institutional POC targets
-            all_pocs = []
-            if ny_p: all_pocs.append(ny_p["poc"])
-            if asia_p: all_pocs.append(asia_p["poc"])
-            if r_poc: all_pocs.append(r_poc)
-
-            if side == "LONG":
-                eligible_pocs = [p for p in all_pocs if p > c_price]
-                if not eligible_pocs:
-                    return None
-                target_poc = min(eligible_pocs)
-
-                reward = target_poc - c_price
-                reward_pct = (reward / c_price) * 100
-                if (reward / c_price) < config.MIN_TARGET_PCT:
-                    return None
-
-                sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * 0.002)
-                sweep_low = min(curr_low, prev_low)
-                stop_loss = min(c_price - sl_buffer, sweep_low * 0.9985)
-                risk = c_price - stop_loss
-                risk_pct = (risk / c_price) * 100
-                rr = reward / risk if risk > 0 else 0
-
-                if risk <= 0 or rr < config.MIN_RR:
-                    return None
-
-                return {
-                    "symbol": symbol,
-                    "weex_symbol": weex_symbol,
-                    "multiplier": multiplier,
-                    "side": "LONG",
-                    "timeframe": config.TIMEFRAME,
-                    "entry_price": c_price,
-                    "stop_loss": stop_loss,
-                    "take_profit": target_poc,
-                    "risk_pct": risk_pct,
-                    "reward_pct": reward_pct,
-                    "rr": rr,
-                    "rsi": c_rsi,
-                    "confluence": f"Profile Reclaim ({' + '.join([k for k, v in [('NY', sig_ny), ('Asia', sig_asia), ('Rolling', sig_roll)] if v])})",
-                    "ny_levels": ny_p,
-                    "asia_levels": asia_p,
-                    "val": min([p["val"] for p in [ny_p, asia_p] if p] or [r_val]),
-                    "vah": max([p["vah"] for p in [ny_p, asia_p] if p] or [r_vah]),
-                    "poc": target_poc
-                }
-
-            elif side == "SHORT":
-                eligible_pocs = [p for p in all_pocs if p < c_price]
-                if not eligible_pocs:
-                    return None
-                target_poc = max(eligible_pocs)
-
-                reward = c_price - target_poc
-                reward_pct = (reward / c_price) * 100
-                if (reward / c_price) < config.MIN_TARGET_PCT:
-                    return None
-
-                sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * 0.002)
-                sweep_high = max(curr_high, prev_high)
-                stop_loss = max(c_price + sl_buffer, sweep_high * 1.0015)
-                risk = stop_loss - c_price
-                risk_pct = (risk / c_price) * 100
-                rr = reward / risk if risk > 0 else 0
-
-                if risk <= 0 or rr < config.MIN_RR:
-                    return None
-
-                return {
-                    "symbol": symbol,
-                    "weex_symbol": weex_symbol,
-                    "multiplier": multiplier,
-                    "side": "SHORT",
-                    "timeframe": config.TIMEFRAME,
-                    "entry_price": c_price,
-                    "stop_loss": stop_loss,
-                    "take_profit": target_poc,
-                    "risk_pct": risk_pct,
-                    "reward_pct": reward_pct,
-                    "rr": rr,
-                    "rsi": c_rsi,
-                    "confluence": f"Profile Reclaim ({' + '.join([k for k, v in [('NY', sig_ny), ('Asia', sig_asia), ('Rolling', sig_roll)] if v])})",
-                    "ny_levels": ny_p,
-                    "asia_levels": asia_p,
-                    "val": min([p["val"] for p in [ny_p, asia_p] if p] or [r_val]),
-                    "vah": max([p["vah"] for p in [ny_p, asia_p] if p] or [r_vah]),
-                    "poc": target_poc
-                }
-
-        # =========================================================================
-        # 2. FALLBACK: ROLLING LOOKBACK WINDOW (If Confluence explicitly disabled)
-        # =========================================================================
-        sub_df = df.iloc[-config.LOOKBACK_BARS - 2:-2]
-        vah, val, poc = compute_vp_levels(sub_df, config.NUM_BINS, config.VAL_PCT)
-
-        if vah is None or val is None or poc is None:
+        if ref_vah is None or ref_val is None or ref_poc is None:
             return None
 
-        # --- LONG TRIGGER ---
-        if prev_price <= val and c_price > val and c_rsi <= config.RSI_LONG_MAX:
-            reward = poc - c_price
+        # --- 1. Base Pattern: Value Area Edge Trap & Reclaim ---
+        raw_side = evaluate_reclaim(
+            c_price=c_price, prev_price=prev_price,
+            curr_low=curr_low, curr_high=curr_high,
+            prev_low=prev_low, prev_high=prev_high,
+            vah=ref_vah, val=ref_val
+        )
+
+        if not raw_side:
+            return None
+
+        # --- 2. Scored Directional Confluence Framework (6 Signals, Max 7 Pts, Min 3 Pts) ---
+        btc_ret = fetch_btc_12bar_return(self.session)
+        score, breakdown = compute_confluence_score(
+            df=df.iloc[:-1],  # Up to closed candle
+            side=raw_side,
+            funding_rate=0.0,
+            bid_ask_depth_ratio=1.0,
+            btc_returns_12=btc_ret
+        )
+
+        if score < config.MIN_CONFLUENCE_SCORE:
+            logger.debug(f"{symbol} ({raw_side}): Confluence score {score}/{config.MIN_CONFLUENCE_SCORE} insufficient. {breakdown}")
+            return None
+
+        # --- 3. Target Selection: Opposite Value Area Edge ---
+        if raw_side == "LONG":
+            target_price = ref_vah  # Target opposite edge (VAH)
+            reward = target_price - c_price
             reward_pct = (reward / c_price) * 100
+            if (reward / c_price) < config.MIN_TARGET_PCT:
+                return None
 
-            if (reward / c_price) >= config.MIN_TARGET_PCT:
-                sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * 0.002)
-                stop_loss = c_price - sl_buffer
-                risk = c_price - stop_loss
-                risk_pct = (risk / c_price) * 100
-                rr = reward / risk if risk > 0 else 0
+            sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * 0.002)
+            sweep_low = min(curr_low, prev_low)
+            stop_loss = min(c_price - sl_buffer, sweep_low * 0.9985)
+            risk = c_price - stop_loss
+            risk_pct = (risk / c_price) * 100
+            rr = reward / risk if risk > 0 else 0
 
-                if risk > 0 and rr >= config.MIN_RR:
-                    return {
-                        "symbol": symbol,
-                        "weex_symbol": weex_symbol,
-                        "multiplier": multiplier,
-                        "side": "LONG",
-                        "timeframe": config.TIMEFRAME,
-                        "entry_price": c_price,
-                        "stop_loss": stop_loss,
-                        "take_profit": poc,
-                        "risk_pct": risk_pct,
-                        "reward_pct": reward_pct,
-                        "rr": rr,
-                        "rsi": c_rsi,
-                        "val": val,
-                        "vah": vah,
-                        "poc": poc
-                    }
+            if risk <= 0 or rr < config.MIN_RR:
+                return None
 
-        # --- SHORT TRIGGER ---
-        elif prev_price >= vah and c_price < vah and c_rsi >= config.RSI_SHORT_MIN:
-            reward = c_price - poc
+            active_factors = [k for k, v in breakdown.items() if v > 0]
+            confluence_str = f"Score {score}/7 ({', '.join(active_factors)})"
+
+            return {
+                "symbol": symbol,
+                "weex_symbol": weex_symbol,
+                "multiplier": multiplier,
+                "side": "LONG",
+                "timeframe": config.TIMEFRAME,
+                "entry_price": c_price,
+                "stop_loss": stop_loss,
+                "take_profit": target_price,
+                "risk_pct": risk_pct,
+                "reward_pct": reward_pct,
+                "rr": rr,
+                "rsi": c_rsi,
+                "confluence_score": score,
+                "confluence_breakdown": breakdown,
+                "confluence": confluence_str,
+                "profile_name": profile_name,
+                "val": ref_val,
+                "vah": ref_vah,
+                "poc": ref_poc
+            }
+
+        elif raw_side == "SHORT":
+            target_price = ref_val  # Target opposite edge (VAL)
+            reward = c_price - target_price
             reward_pct = (reward / c_price) * 100
+            if (reward / c_price) < config.MIN_TARGET_PCT:
+                return None
 
-            if (reward / c_price) >= config.MIN_TARGET_PCT:
-                sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * 0.002)
-                stop_loss = c_price + sl_buffer
-                risk = stop_loss - c_price
-                risk_pct = (risk / c_price) * 100
-                rr = reward / risk if risk > 0 else 0
+            sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * 0.002)
+            sweep_high = max(curr_high, prev_high)
+            stop_loss = max(c_price + sl_buffer, sweep_high * 1.0015)
+            risk = stop_loss - c_price
+            risk_pct = (risk / c_price) * 100
+            rr = reward / risk if risk > 0 else 0
 
-                if risk > 0 and rr >= config.MIN_RR:
-                    return {
-                        "symbol": symbol,
-                        "weex_symbol": weex_symbol,
-                        "multiplier": multiplier,
-                        "side": "SHORT",
-                        "timeframe": config.TIMEFRAME,
-                        "entry_price": c_price,
-                        "stop_loss": stop_loss,
-                        "take_profit": poc,
-                        "risk_pct": risk_pct,
-                        "reward_pct": reward_pct,
-                        "rr": rr,
-                        "rsi": c_rsi,
-                        "val": val,
-                        "vah": vah,
-                        "poc": poc
-                    }
+            if risk <= 0 or rr < config.MIN_RR:
+                return None
+
+            active_factors = [k for k, v in breakdown.items() if v > 0]
+            confluence_str = f"Score {score}/7 ({', '.join(active_factors)})"
+
+            return {
+                "symbol": symbol,
+                "weex_symbol": weex_symbol,
+                "multiplier": multiplier,
+                "side": "SHORT",
+                "timeframe": config.TIMEFRAME,
+                "entry_price": c_price,
+                "stop_loss": stop_loss,
+                "take_profit": target_price,
+                "risk_pct": risk_pct,
+                "reward_pct": reward_pct,
+                "rr": rr,
+                "rsi": c_rsi,
+                "confluence_score": score,
+                "confluence_breakdown": breakdown,
+                "confluence": confluence_str,
+                "profile_name": profile_name,
+                "val": ref_val,
+                "vah": ref_vah,
+                "poc": ref_poc
+            }
 
         return None
 

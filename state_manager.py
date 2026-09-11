@@ -150,17 +150,65 @@ class StateManager:
         except Exception as e:
             logger.warning(f"Could not synchronize positions with WEEX: {e}")
 
-    def sync_dry_run_positions(self, notifier=None):
+    def is_daily_loss_limit_reached(self, current_balance: float) -> bool:
         """
-        In dry-run mode, expires simulated positions that exceed MAX_HOLDING_BARS (4 hours).
+        Checks if realized + open P&L for today exceeds MAX_DAILY_LOSS_PCT (3%).
+        Resets at 00:00 UTC each day.
         """
-        current_local = dict(self.state.get("active_positions", {}))
-        max_duration = config.MAX_HOLDING_BARS * 300  # 4 hours
-        now = time.time()
-        for sym, pos_data in current_local.items():
-            opened_at = pos_data.get("timestamp", now)
-            if now - opened_at > max_duration:
-                logger.info(f"[DRY-RUN] Holding duration exceeded for {sym}. Closing simulated position.")
-                self.record_position_close(sym, exit_reason="MAX_HOLDING_EXPIRED")
-                if notifier:
-                    notifier.notify_trade_closed(sym, exit_reason="Max Holding Expired (Dry-Run)")
+        now_utc = time.gmtime()
+        today_str = f"{now_utc.tm_year}-{now_utc.tm_mon:02d}-{now_utc.tm_mday:02d}"
+
+        if "daily_equity" not in self.state:
+            self.state["daily_equity"] = {}
+
+        daily_info = self.state["daily_equity"].get(today_str)
+        if not daily_info or daily_info.get("start_balance", 0) <= 0:
+            if current_balance > 0:
+                self.state["daily_equity"][today_str] = {
+                    "start_balance": current_balance,
+                    "date": today_str
+                }
+                self.save()
+            return False
+
+        start_bal = float(daily_info["start_balance"])
+        if start_bal <= 0:
+            return False
+
+        drawdown_pct = (start_bal - current_balance) / start_bal
+        if drawdown_pct >= config.MAX_DAILY_LOSS_PCT:
+            logger.warning(
+                f"DAILY LOSS LIMIT REACHED: Account drawdown is {drawdown_pct*100:.2f}% "
+                f"(Limit: {config.MAX_DAILY_LOSS_PCT*100:.2f}%). Halting new entries for today ({today_str})."
+            )
+            return True
+
+        return False
+
+    def is_position_correlated(self, candidate_symbol: str, candidate_df: Any) -> bool:
+        """
+        Calculates 30-bar price return correlation between candidate symbol and active positions.
+        Returns True if correlation exceeds MAX_OPEN_CORR (0.85).
+        """
+        active_positions = self.state.get("active_positions", {})
+        if not active_positions or candidate_df is None or len(candidate_df) < 30:
+            return False
+
+        try:
+            cand_rets = candidate_df["close"].pct_change().iloc[-30:]
+
+            for sym, pos_data in active_positions.items():
+                pos_df = pos_data.get("df_recent")
+                if pos_df is not None and len(pos_df) >= 30:
+                    pos_rets = pos_df["close"].pct_change().iloc[-30:]
+                    corr = cand_rets.corr(pos_rets)
+                    if not np.isnan(corr) and abs(corr) >= config.MAX_OPEN_CORR:
+                        logger.info(
+                            f"Correlation Guard Triggered: {candidate_symbol} correlation with active position "
+                            f"{sym} is {corr:.2f} (Limit: {config.MAX_OPEN_CORR}). Skipping."
+                        )
+                        return True
+        except Exception as e:
+            logger.debug(f"Correlation calculation skipped: {e}")
+
+        return False

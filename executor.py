@@ -60,6 +60,12 @@ class TradeExecutor:
             logger.info(f"Skipping {symbol} ({weex_symbol}): Max concurrent positions limit ({config.MAX_CONCURRENT_TRADES}) reached ({active_count} active).")
             return False
 
+        # 1b. Daily Account Loss Limit guard
+        balance = self.weex.get_available_margin()
+        if balance > 0 and self.state_mgr.is_daily_loss_limit_reached(balance):
+            logger.info(f"Skipping {symbol} ({weex_symbol}): Daily account loss limit (-3%) reached.")
+            return False
+
         # 2. Circuit breaker guard
         if self.state_mgr.is_coin_frozen(symbol) or self.state_mgr.is_coin_frozen(weex_symbol):
             logger.info(f"Skipping {symbol} ({weex_symbol}): Currently frozen by circuit breaker.")

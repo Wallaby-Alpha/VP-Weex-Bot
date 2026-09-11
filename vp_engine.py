@@ -29,11 +29,12 @@ def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
 def compute_vp_levels(
     sub_df: pd.DataFrame,
     num_bins: int = 30,
-    val_pct: float = 0.70
+    val_pct: float = 0.70,
+    curr_price: Optional[float] = None
 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
     Calculates Point of Control (POC), Value Area High (VAH), and Value Area Low (VAL)
-    using volume-weighted price binning.
+    using volume-weighted price binning with current-price tie-breaking.
     """
     prices = sub_df["close"].values
     volumes = sub_df["volume"].values
@@ -61,16 +62,29 @@ def compute_vp_levels(
     accum = hist[poc_idx]
     up_idx, dn_idx = poc_idx, poc_idx
 
+    c_price_ref = curr_price if curr_price is not None else poc_price
+
     while accum < target_vol and (up_idx < num_bins - 1 or dn_idx > 0):
         next_up = hist[up_idx + 1] if up_idx < num_bins - 1 else -1
         next_dn = hist[dn_idx - 1] if dn_idx > 0 else -1
 
-        if next_up >= next_dn and next_up != -1:
+        if next_up > next_dn and next_up != -1:
             up_idx += 1
             accum += next_up
-        elif next_dn != -1:
+        elif next_dn > next_up and next_dn != -1:
             dn_idx -= 1
             accum += next_dn
+        elif next_up == next_dn and next_up != -1:
+            # Tie-break rule: expand toward the bin closer to current price
+            up_mid = (bins[up_idx + 1] + bins[up_idx + 2]) / 2.0 if up_idx < num_bins - 1 else float("inf")
+            dn_mid = (bins[dn_idx - 1] + bins[dn_idx]) / 2.0 if dn_idx > 0 else float("inf")
+            
+            if abs(up_mid - c_price_ref) <= abs(dn_mid - c_price_ref):
+                up_idx += 1
+                accum += next_up
+            else:
+                dn_idx -= 1
+                accum += next_dn
         else:
             break
 
@@ -88,15 +102,12 @@ def compute_session_profiles(
     """
     Extracts the most recently completed New York and Asia sessions from the 5m klines
     dataframe and calculates the Volume Profile levels (VAH, VAL, POC) for each.
-    
-    Returns:
-        dict with keys 'ny' and 'asia', each containing:
-            {'name': str, 'date': str, 'vah': float, 'val': float, 'poc': float}
     """
     if df.empty or len(df) < 50:
         return {}
 
     profiles = {}
+    c_price_ref = float(df["close"].iloc[-1])
 
     # Ensure timestamp column is datetime with UTC tz
     if "timestamp" not in df.columns:
@@ -119,15 +130,13 @@ def compute_session_profiles(
         if latest_bar_ny.dayofweek >= 5:  # Weekend: locks to Friday's completed NY
             target_ny = ny_days[-1]
         elif ny_days[-1] == latest_bar_ny.date() and latest_bar_ny.time() < t_ny_close:
-            # Today's NY session is in the data but still developing, use previous completed
             target_ny = ny_days[-2] if len(ny_days) >= 2 else ny_days[-1]
         else:
-            # Today's NY session has closed, or hasn't started yet so the last day in list is already completed
             target_ny = ny_days[-1]
 
         ny_slice = df_ny[ny_mask & (df_ny["ny_date"] == target_ny)]
         if len(ny_slice) >= 15:
-            vah, val, poc = compute_vp_levels(ny_slice, num_bins, val_pct)
+            vah, val, poc = compute_vp_levels(ny_slice, num_bins, val_pct, curr_price=c_price_ref)
             if vah is not None and val is not None and poc is not None:
                 profiles["ny"] = {
                     "name": f"NY Session ({target_ny})",
@@ -149,15 +158,13 @@ def compute_session_profiles(
     if asia_days:
         latest_bar_utc = df["timestamp"].iloc[-1]
         if asia_days[-1] == latest_bar_utc.date() and latest_bar_utc.time() < t_asia_close:
-            # Today's Asia session still developing, use previous completed
             target_asia = asia_days[-2] if len(asia_days) >= 2 else asia_days[-1]
         else:
-            # Today's Asia session has closed, or hasn't started yet
             target_asia = asia_days[-1]
 
         asia_slice = df_asia[asia_mask & (df_asia["utc_date"] == target_asia)]
         if len(asia_slice) >= 15:
-            vah, val, poc = compute_vp_levels(asia_slice, num_bins, val_pct)
+            vah, val, poc = compute_vp_levels(asia_slice, num_bins, val_pct, curr_price=c_price_ref)
             if vah is not None and val is not None and poc is not None:
                 profiles["asia"] = {
                     "name": f"Asia Session ({target_asia})",
@@ -179,9 +186,9 @@ def evaluate_reclaim(
     prev_high: float,
     vah: float,
     val: float,
-    c_rsi: float,
-    rsi_long_max: float = 46.0,
-    rsi_short_min: float = 54.0
+    c_rsi: float = 50.0,
+    rsi_long_max: float = 100.0,
+    rsi_short_min: float = 0.0
 ) -> Optional[str]:
     """
     Evaluates whether the candle sequence confirms a Value Area trap reclaim.
@@ -190,14 +197,119 @@ def evaluate_reclaim(
     # LONG Reclaim: price dipped/swept below VAL and closed back inside Value Area
     swept_below_val = (prev_price <= val) or (curr_low <= val) or (prev_low <= val)
     if swept_below_val and (c_price > val) and (c_price < vah):
-        if c_rsi <= rsi_long_max:
-            return "LONG"
+        return "LONG"
 
     # SHORT Reclaim: price pushed/swept above VAH and closed back inside Value Area
     swept_above_vah = (prev_price >= vah) or (curr_high >= vah) or (prev_high >= vah)
     if swept_above_vah and (c_price < vah) and (c_price > val):
-        if c_rsi >= rsi_short_min:
-            return "SHORT"
+        return "SHORT"
 
     return None
+
+
+def compute_confluence_score(
+    df: pd.DataFrame,
+    side: str,                  # "LONG" or "SHORT"
+    funding_rate: float = 0.0,
+    bid_ask_depth_ratio: float = 1.0,
+    btc_returns_12: Optional[float] = None
+) -> Tuple[int, Dict[str, int]]:
+    """
+    Evaluates 6 directional confluence signals and returns (total_score, breakdown_dict).
+    
+    1. CVD Absorption (2 pts): Volume delta divergence during sweep bar.
+    2. Reclaim Bar Volume (1 pt): Volume on reclaim bar >= 1.5x 20-bar avg volume.
+    3. HTF Trend Alignment (1 pt): 1h EMA20 > EMA50 for LONG, opposite for SHORT.
+    4. Relative Strength vs BTC (1 pt): Coin's 12-bar return vs BTC 12-bar return.
+    5. Funding Rate Skew (1 pt): Funding <= 0 for LONG, Funding >= 0 for SHORT.
+    6. Order Book Depth Imbalance (1 pt): Bid depth > Ask depth for LONG, opposite for SHORT.
+    """
+    score = 0
+    breakdown = {}
+
+    curr_bar = df.iloc[-1]
+    prev_bar = df.iloc[-2]
+
+    # --- 1. CVD Absorption (2 pts) ---
+    curr_delta = (curr_bar["close"] - curr_bar["open"]) / (curr_bar["high"] - curr_bar["low"] + 1e-9) * curr_bar["volume"]
+    prev_delta = (prev_bar["close"] - prev_bar["open"]) / (prev_bar["high"] - prev_bar["low"] + 1e-9) * prev_bar["volume"]
+
+    if side == "LONG":
+        if (curr_bar["low"] <= prev_bar["low"]) and (curr_delta > 0 or (curr_delta + prev_delta) > 0):
+            score += 2
+            breakdown["CVD Absorption"] = 2
+        else:
+            breakdown["CVD Absorption"] = 0
+    else:  # SHORT
+        if (curr_bar["high"] >= prev_bar["high"]) and (curr_delta < 0 or (curr_delta + prev_delta) < 0):
+            score += 2
+            breakdown["CVD Absorption"] = 2
+        else:
+            breakdown["CVD Absorption"] = 0
+
+    # --- 2. Reclaim Candle Volume (1 pt) ---
+    vol_20_avg = df["volume"].iloc[-21:-1].mean() if len(df) >= 21 else df["volume"].mean()
+    if curr_bar["volume"] >= 1.5 * vol_20_avg:
+        score += 1
+        breakdown["Reclaim Volume"] = 1
+    else:
+        breakdown["Reclaim Volume"] = 0
+
+    # --- 3. HTF Trend Alignment (1 pt) ---
+    ema20 = df["close"].ewm(span=240, adjust=False).mean().iloc[-1]
+    ema50 = df["close"].ewm(span=600, adjust=False).mean().iloc[-1]
+    c_price = curr_bar["close"]
+
+    if side == "LONG" and (ema20 > ema50 or c_price > ema50):
+        score += 1
+        breakdown["HTF Trend"] = 1
+    elif side == "SHORT" and (ema20 < ema50 or c_price < ema50):
+        score += 1
+        breakdown["HTF Trend"] = 1
+    else:
+        breakdown["HTF Trend"] = 0
+
+    # --- 4. Relative Strength vs BTC (1 pt) ---
+    if len(df) >= 13:
+        coin_ret = (df["close"].iloc[-1] - df["close"].iloc[-13]) / (df["close"].iloc[-13] + 1e-9)
+        if btc_returns_12 is not None:
+            if side == "LONG" and coin_ret > btc_returns_12:
+                score += 1
+                breakdown["BTC Rel Strength"] = 1
+            elif side == "SHORT" and coin_ret < btc_returns_12:
+                score += 1
+                breakdown["BTC Rel Strength"] = 1
+            else:
+                breakdown["BTC Rel Strength"] = 0
+        else:
+            if (side == "LONG" and coin_ret > 0) or (side == "SHORT" and coin_ret < 0):
+                score += 1
+                breakdown["BTC Rel Strength"] = 1
+            else:
+                breakdown["BTC Rel Strength"] = 0
+    else:
+        breakdown["BTC Rel Strength"] = 0
+
+    # --- 5. Funding Rate Skew (1 pt) ---
+    if side == "LONG" and funding_rate <= 0:
+        score += 1
+        breakdown["Funding Skew"] = 1
+    elif side == "SHORT" and funding_rate >= 0:
+        score += 1
+        breakdown["Funding Skew"] = 1
+    else:
+        breakdown["Funding Skew"] = 0
+
+    # --- 6. Order Book Depth Imbalance (1 pt) ---
+    if side == "LONG" and bid_ask_depth_ratio > 1.05:
+        score += 1
+        breakdown["Order Book Imbalance"] = 1
+    elif side == "SHORT" and bid_ask_depth_ratio < 0.95:
+        score += 1
+        breakdown["Order Book Imbalance"] = 1
+    else:
+        breakdown["Order Book Imbalance"] = 0
+
+    return score, breakdown
+
 

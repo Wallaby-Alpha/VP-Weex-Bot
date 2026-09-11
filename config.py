@@ -17,7 +17,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 DRY_RUN = os.getenv("DRY_RUN", "True").lower() in ("true", "1", "yes")
 POSITION_SIZE_PCT = float(os.getenv("POSITION_SIZE_PCT", "0.10"))  # 10% of balance per trade
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "3"))        # 3x isolated leverage
-MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", "2"))  # Max simultaneous active positions
+MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", "4"))  # Max simultaneous active positions (v2)
+MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.03"))   # Account daily 3% loss limit guard
+MAX_OPEN_CORR = float(os.getenv("MAX_OPEN_CORR", "0.85"))             # Max 30-bar return correlation cap
 
 # --- 5-Minute Volume Profile Strategy Parameters ---
 TIMEFRAME = "5m"
@@ -26,13 +28,12 @@ NUM_BINS = 30
 VAL_PCT = 0.70
 ATR_PERIOD = 14
 ATR_MULT_STOP = 1.6
-MIN_RR = 1.4
-MIN_TARGET_PCT = 0.010      # Require at least 1.00% gross move to POC
+MIN_RR = 1.80               # Raised to 1.80 R:R for opposite VA target
+MIN_TARGET_PCT = 0.010      # Require at least 1.00% gross move to target
 MAX_HOLDING_BARS = 48       # 4 hours max hold time
 COOLDOWN_BARS = 8           # 40 mins cooldown
 RSI_PERIOD = 14
-RSI_LONG_MAX = 46.0         # Must be recovering from oversold
-RSI_SHORT_MIN = 54.0        # Must be exhausting from overbought
+MIN_CONFLUENCE_SCORE = int(os.getenv("MIN_CONFLUENCE_SCORE", "3"))  # Min score out of 7
 
 # --- Session Confluence Strategy Settings ---
 REQUIRE_SESSION_CONFLUENCE = os.getenv("REQUIRE_SESSION_CONFLUENCE", "True").lower() in ("true", "1", "yes")
@@ -49,9 +50,9 @@ MAX_CONSECUTIVE_LOSSES = 2
 CIRCUIT_BREAKER_FREEZE_BARS = 24  # Freeze coin for 2 hours on 2 losses
 
 # --- Universe Screener (Top 200 by Volume) ---
-MIN_24H_VOLUME_USD = float(os.getenv("MIN_24H_VOLUME_USD", "50000"))  # Minimum $50k 24h volume
-MAX_24H_VOLUME_USD = float(os.getenv("MAX_24H_VOLUME_USD", "inf"))    # No upper cap: captures top high-volume movers
-MAX_PAIRS = int(os.getenv("MAX_PAIRS", "200"))                        # Scan top 200 coins
+MIN_24H_VOLUME_USD = float(os.getenv("MIN_24H_VOLUME_USD", "250000"))  # Raised to $250k volume floor
+MAX_24H_VOLUME_USD = float(os.getenv("MAX_24H_VOLUME_USD", "inf"))     # No upper cap: captures top high-volume movers
+MAX_PAIRS = int(os.getenv("MAX_PAIRS", "200"))                         # Scan top 200 coins
 
 # Blacklist: Non-viable meme tokens and BTC-slaved dinosaur coins
 EXCLUDED_SUBSTRINGS = [

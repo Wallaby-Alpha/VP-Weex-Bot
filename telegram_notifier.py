@@ -39,35 +39,28 @@ class TelegramNotifier:
 
     def notify_trade_signal(self, trade: dict):
         """
-        Formats and dispatches trade signal details with session confluence metrics.
+        Formats and dispatches trade signal details with v2 Confluence score metrics.
         """
         side = trade["side"].upper()
         icon = "🟢" if side == "LONG" else "🔴"
         action = "LONG ENTRY" if side == "LONG" else "SHORT ENTRY"
         dry_str = " <b>[DRY RUN - SIMULATED]</b>" if trade.get("dry_run", False) else " <b>[LIVE WEEX ORDER]</b>"
 
-        ny_p = trade.get("ny_levels", {})
-        asia_p = trade.get("asia_levels", {})
-        confluence_info = ""
-        if ny_p and asia_p:
-            confluence_info = (
-                f"<b>Confluence:</b> <code>🎯 NY + Asia Reclaim Agreement</code>\n"
-                f"<b>NY Session POC:</b> <code>${ny_p.get('poc', 0):.4f}</code>\n"
-                f"<b>Asia Session POC:</b> <code>${asia_p.get('poc', 0):.4f}</code>\n"
-            )
+        conf_str = trade.get("confluence", f"Score {trade.get('confluence_score', 0)}/7")
+        profile_name = trade.get("profile_name", "NY Session")
+        target_label = "VAH (Opposite Edge)" if side == "LONG" else "VAL (Opposite Edge)"
 
         msg = (
             f"{icon} <b>{action} TRIGGERED</b>{dry_str}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<b>Pair:</b> <code>#{trade['symbol']}</code>\n"
-            f"<b>Timeframe:</b> <code>{trade.get('timeframe', '5m')}</code>\n"
+            f"<b>Profile Anchor:</b> <code>{profile_name}</code>\n"
             f"<b>Entry Price:</b> <code>${trade['entry_price']:.4f}</code>\n"
-            f"<b>Target TP (POC):</b> <code>${trade['take_profit']:.4f}</code> (+{trade['reward_pct']:.2f}%)\n"
+            f"<b>Target TP ({target_label}):</b> <code>${trade['take_profit']:.4f}</code> (+{trade['reward_pct']:.2f}%)\n"
             f"<b>Stop Loss:</b> <code>${trade['stop_loss']:.4f}</code> (-{trade['risk_pct']:.2f}%)\n"
             f"<b>Risk / Reward:</b> <code>{trade['rr']:.2f}</code>\n"
-            f"<b>Order Size:</b> <code>{trade['quantity']} contracts</code> (~10% Portfolio)\n"
-            f"<b>RSI(14):</b> <code>{trade.get('rsi', 0):.1f}</code>\n"
-            f"{confluence_info}"
+            f"<b>Order Size:</b> <code>{trade['quantity']} contracts</code> (~10% Margin)\n"
+            f"<b>🎯 Confluence:</b> <code>{conf_str}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<i>Protection: Native WEEX Stop-Loss & Take-Profit Attached</i>"
         )
@@ -85,19 +78,19 @@ class TelegramNotifier:
 
     def notify_startup(self, active_pairs: list, dry_run: bool, balance: float):
         mode = "🟡 DRY-RUN (Alerts Only)" if dry_run else "🟢 LIVE TRADING (WEEX Contract Active)"
-        confluence_tag = "🎯 Dual-Session (NY + Asia Agree)" if config.REQUIRE_SESSION_CONFLUENCE else "Single Rolling Window"
         msg = (
-            f"🤖 <b>VP CONFLUENCE BOT ONLINE</b>\n"
+            f"🤖 <b>VP WEEX BOT V2 ONLINE</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<b>Mode:</b> {mode}\n"
-            f"<b>Strategy:</b> {confluence_tag}\n"
+            f"<b>Strategy:</b> NY Session VA Reclaim + Scored Confluence\n"
             f"<b>Available USDT:</b> <code>${balance:,.2f}</code>\n"
+            f"<b>Volume Floor:</b> <code>>= ${config.MIN_24H_VOLUME_USD:,.0f} 24h Vol</code>\n"
             f"<b>Active Universe:</b> <code>{len(active_pairs)} Pairs</code>\n"
             f"<b>Max Concurrent:</b> <code>{config.MAX_CONCURRENT_TRADES} Trades</code>\n"
-            f"<b>Timeframe:</b> <code>{config.TIMEFRAME}</code>\n"
-            f"<b>Target Hurdle:</b> <code>>={config.MIN_TARGET_PCT * 100:.2f}% move to POC</code>\n"
+            f"<b>Min Confluence:</b> <code>{config.MIN_CONFLUENCE_SCORE}/7 Points</code>\n"
+            f"<b>Min Target R:R:</b> <code>>={config.MIN_RR:.2f} R:R</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>Only executing high-conviction trades with dual institutional session agreement.</i>"
+            f"<i>Executing high-reward VA edge sweeps with multi-factor directional confluence.</i>"
         )
         self.send_message(msg)
 
