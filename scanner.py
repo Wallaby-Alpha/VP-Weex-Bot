@@ -80,6 +80,8 @@ class MarketScanner:
             return []
 
         candidates = []
+        seen_weex_symbols = set()
+
         for t in tickers:
             sym = t.get("symbol", "")
             if not sym.endswith("USDT"):
@@ -97,7 +99,12 @@ class MarketScanner:
                 continue
 
             # Ensure symbol is tradable via WEEX API (or maps to 1000X)
-            if not self.resolve_symbol(sym):
+            resolved = self.resolve_symbol(sym)
+            if not resolved:
+                continue
+
+            weex_sym, _ = resolved
+            if weex_sym in seen_weex_symbols:
                 continue
 
             try:
@@ -108,6 +115,7 @@ class MarketScanner:
 
             if config.MIN_24H_VOLUME_USD <= quote_vol <= config.MAX_24H_VOLUME_USD and last_price > 0:
                 candidates.append({"symbol": sym, "quoteVolume": quote_vol})
+                seen_weex_symbols.add(weex_sym)
 
         candidates.sort(key=lambda x: x["quoteVolume"], reverse=True)
         selected = [c["symbol"] for c in candidates[:max_pairs]]

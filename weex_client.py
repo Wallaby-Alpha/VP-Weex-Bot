@@ -99,6 +99,8 @@ class WeexClient:
                 return resp.json()
             except Exception as e:
                 logger.warning(f"WEEX request attempt {attempt + 1} failed for {method} {path}: {e}")
+                if method.upper() == "POST":
+                    break
                 time.sleep(1.0)
 
         return {"code": -1, "msg": "Request failed after 3 attempts"}

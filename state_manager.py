@@ -104,8 +104,16 @@ class StateManager:
             self.state["trade_history"].append(pos)
             self.save()
 
-    def has_open_position(self, symbol: str) -> bool:
-        return symbol in self.state.get("active_positions", {})
+    def has_open_position(self, symbol: str, weex_symbol: Optional[str] = None) -> bool:
+        active = self.state.get("active_positions", {})
+        if symbol in active or (weex_symbol and weex_symbol in active):
+            return True
+        for pos_data in active.values():
+            pos_sym = pos_data.get("symbol")
+            pos_weex_sym = pos_data.get("weex_symbol")
+            if symbol in (pos_sym, pos_weex_sym) or (weex_symbol and weex_symbol in (pos_sym, pos_weex_sym)):
+                return True
+        return False
 
     def get_active_positions_count(self) -> int:
         return len(self.state.get("active_positions", {}))

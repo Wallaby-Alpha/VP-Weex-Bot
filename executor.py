@@ -66,7 +66,7 @@ class TradeExecutor:
             return False
 
         # 3. Duplicate position guard
-        if self.state_mgr.has_open_position(symbol) or self.state_mgr.has_open_position(weex_symbol):
+        if self.state_mgr.has_open_position(symbol, weex_symbol):
             logger.info(f"Skipping {symbol} ({weex_symbol}): Already holding an open position.")
             return False
 
