@@ -141,6 +141,10 @@ class TradeExecutor:
             "reward_pct": signal["reward_pct"],
             "rr": signal["rr"],
             "rsi": signal["rsi"],
+            "confluence": signal.get("confluence", "N/A"),
+            "confluence_score": signal.get("confluence_score", 0),
+            "confluence_breakdown": signal.get("confluence_breakdown", {}),
+            "profile_name": signal.get("profile_name", "NY Session"),
             "timestamp": time.time(),
             "dry_run": config.DRY_RUN
         }
