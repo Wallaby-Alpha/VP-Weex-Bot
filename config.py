@@ -30,6 +30,7 @@ ATR_PERIOD = 14
 ATR_MULT_STOP = 1.6
 MIN_RR = 1.80               # Raised to 1.80 R:R for opposite VA target
 MIN_TARGET_PCT = 0.007      # Require at least 0.70% gross move to target
+MIN_STOP_PCT = float(os.getenv("MIN_STOP_PCT", "0.0075")) # Require at least 0.75% minimum SL distance from entry
 MAX_HOLDING_BARS = 48       # 4 hours max hold time
 COOLDOWN_BARS = 8           # 40 mins cooldown
 RSI_PERIOD = 14

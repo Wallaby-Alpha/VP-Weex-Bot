@@ -285,9 +285,11 @@ class MarketScanner:
             if (reward / c_price) < config.MIN_TARGET_PCT:
                 return None
 
-            sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * 0.002)
+            sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * config.MIN_STOP_PCT)
             sweep_low = min(curr_low, prev_low)
-            stop_loss = min(c_price - sl_buffer, sweep_low * 0.9985)
+            raw_sl = min(c_price - sl_buffer, sweep_low * 0.9985)
+            # Enforce minimum Stop Loss floor (at least MIN_STOP_PCT away from entry)
+            stop_loss = min(raw_sl, c_price * (1.0 - config.MIN_STOP_PCT))
             risk = c_price - stop_loss
             risk_pct = (risk / c_price) * 100
             rr = reward / risk if risk > 0 else 0
@@ -327,9 +329,11 @@ class MarketScanner:
             if (reward / c_price) < config.MIN_TARGET_PCT:
                 return None
 
-            sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * 0.002)
+            sl_buffer = max(c_atr * config.ATR_MULT_STOP, c_price * config.MIN_STOP_PCT)
             sweep_high = max(curr_high, prev_high)
-            stop_loss = max(c_price + sl_buffer, sweep_high * 1.0015)
+            raw_sl = max(c_price + sl_buffer, sweep_high * 1.0015)
+            # Enforce minimum Stop Loss floor (at least MIN_STOP_PCT away from entry)
+            stop_loss = max(raw_sl, c_price * (1.0 + config.MIN_STOP_PCT))
             risk = stop_loss - c_price
             risk_pct = (risk / c_price) * 100
             rr = reward / risk if risk > 0 else 0
