@@ -35,6 +35,12 @@ COOLDOWN_BARS = 8           # 40 mins cooldown
 RSI_PERIOD = 14
 MIN_CONFLUENCE_SCORE = int(os.getenv("MIN_CONFLUENCE_SCORE", "3"))  # Min score out of 7
 
+# --- Profit Protection & Trailing Stop Settings ---
+BREAKEVEN_TRIGGER_PCT = float(os.getenv("BREAKEVEN_TRIGGER_PCT", "0.015"))       # +1.5% unrealized gain moves SL to entry
+BREAKEVEN_BUFFER_PCT = float(os.getenv("BREAKEVEN_BUFFER_PCT", "0.001"))        # +0.10% buffer to cover trading fees
+TRAILING_PROFIT_TRIGGER_PCT = float(os.getenv("TRAILING_PROFIT_TRIGGER_PCT", "0.030")) # +3.0% unrealized gain starts trailing
+TRAILING_PROFIT_RETENTION = float(os.getenv("TRAILING_PROFIT_RETENTION", "0.50"))    # Retains 50% of peak unrealized profit
+
 # --- Session Confluence Strategy Settings ---
 REQUIRE_SESSION_CONFLUENCE = os.getenv("REQUIRE_SESSION_CONFLUENCE", "True").lower() in ("true", "1", "yes")
 NY_SESSION_OPEN = "09:30:00"

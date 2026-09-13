@@ -300,6 +300,44 @@ class WeexClient:
             "raw": res
         }
 
+    def set_position_tpsl(
+        self,
+        symbol: str,
+        position_side: str,     # "LONG" or "SHORT"
+        tp_price: Optional[float] = None,
+        sl_price: Optional[float] = None
+    ) -> bool:
+        """
+        Sets or updates native position-level Take Profit / Stop Loss trigger prices on WEEX.
+        """
+        payload = {
+            "symbol": symbol,
+            "holdSide": position_side.upper()
+        }
+        if tp_price is not None and float(tp_price) > 0:
+            payload["takeProfitPrice"] = str(tp_price)
+        if sl_price is not None and float(sl_price) > 0:
+            payload["stopLossPrice"] = str(sl_price)
+
+        res = self.request("POST", "/capi/v3/order/tpsl", payload)
+        if isinstance(res, dict):
+            code = str(res.get("code", ""))
+            return code in ("0", "00000", "200") or res.get("success", False)
+        return False
+
+    def close_position(self, symbol: str, position_side: str, quantity: float) -> Dict[str, Any]:
+        """
+        Closes an active contract position on WEEX via market order.
+        position_side is "LONG" or "SHORT".
+        """
+        order_side = "SELL" if position_side.upper() == "LONG" else "BUY"
+        return self.place_order_with_tpsl(
+            symbol=symbol,
+            side=order_side,
+            position_side=position_side.upper(),
+            quantity=quantity
+        )
+
     def get_active_positions(self) -> List[Dict[str, Any]]:
         """
         Returns all open positions with positive size.
@@ -319,6 +357,7 @@ class WeexClient:
                     "size": size,
                     "openValue": float(p.get("openValue", 0.0)),
                     "entryPrice": float(p.get("openPrice") or p.get("entryPrice") or 0.0),
+                    "markPrice": float(p.get("markPrice") or p.get("last") or 0.0),
                     "unrealizePnl": float(p.get("unrealizePnl", 0.0)),
                     "tpOrderId": p.get("stopProfitId") or p.get("tpOrderId"),
                     "slOrderId": p.get("stopLossId") or p.get("slOrderId")

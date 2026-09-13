@@ -106,3 +106,25 @@ class TelegramNotifier:
             f"<b>Concurrent Slots:</b> Slot freed up for next setup."
         )
         self.send_message(msg)
+
+    def notify_profit_protection(self, symbol: str, side: str, gain_pct: float, new_sl: float):
+        msg = (
+            f"🛡️ <b>BREAK-EVEN ACTIVATED: #{symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Direction:</b> {side.upper()}\n"
+            f"<b>Unrealized Gain:</b> <code>+{gain_pct:.2f}%</code>\n"
+            f"<b>Protection:</b> Stop Loss moved to Break-Even (<code>${new_sl:.4f}</code>)\n"
+            f"<i>Zero risk remaining on this position.</i>"
+        )
+        self.send_message(msg)
+
+    def notify_profit_locked(self, symbol: str, side: str, gain_pct: float, exit_price: float):
+        msg = (
+            f"💰 <b>PROFIT LOCKED: #{symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Direction:</b> {side.upper()}\n"
+            f"<b>Exit Price:</b> <code>${exit_price:.4f}</code>\n"
+            f"<b>Realized Return:</b> <code>+{gain_pct:.2f}%</code>\n"
+            f"<i>Trailing profit protection executed before market reversal.</i>"
+        )
+        self.send_message(msg)

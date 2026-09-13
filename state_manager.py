@@ -121,31 +121,122 @@ class StateManager:
     def sync_with_exchange(self, weex_client, notifier=None):
         """
         Synchronizes state with actual open contract positions on WEEX.
-        When a position hits TP or SL on WEEX, it automatically closes on the exchange.
-        This detects the closure, archives the trade, notifies Telegram, and frees the concurrent trade slot.
+        Detects closed positions (TP/SL hits on exchange) and frees slots.
+        Also evaluates active positions for Break-Even SL adjustment and Trailing Profit Retention
+        to prevent trades with high unrealized gains (e.g. +5% to +28%) from roundtripping into losses.
         """
         try:
             live_positions = weex_client.get_active_positions()
+            live_map = {}
             live_symbols = set()
+
             for p in live_positions:
                 sym = p.get("symbol", "")
                 if sym:
                     live_symbols.add(sym)
-                    # Support matching with/without 1000 prefix
+                    live_map[sym] = p
                     if sym.startswith("1000"):
-                        live_symbols.add(sym[4:])
+                        clean_sym = sym[4:]
+                        live_symbols.add(clean_sym)
+                        live_map[clean_sym] = p
                     else:
-                        live_symbols.add(f"1000{sym}")
+                        mult_sym = f"1000{sym}"
+                        live_symbols.add(mult_sym)
+                        live_map[mult_sym] = p
 
             current_local = dict(self.state.get("active_positions", {}))
             for sym, pos_data in current_local.items():
                 weex_sym = pos_data.get("weex_symbol", sym)
-                # If neither the base symbol nor weex_symbol exists in active positions on WEEX:
+                side = pos_data.get("side", "LONG").upper()
+                entry_price = float(pos_data.get("entry_price", 0.0))
+                quantity = float(pos_data.get("quantity", 0.0))
+
+                # 1. Closed Position Detection
                 if sym not in live_symbols and weex_sym not in live_symbols:
                     logger.info(f"Position {sym} ({weex_sym}) closed on WEEX (TP/SL triggered). Clearing slot.")
                     self.record_position_close(sym, exit_reason="TP/SL_TRIGGERED_ON_EXCHANGE")
                     if notifier:
                         notifier.notify_trade_closed(sym, exit_reason="TP/SL Hit on WEEX")
+                    continue
+
+                # 2. Profit Protection & Dynamic Break-Even Monitoring
+                live_p = live_map.get(weex_sym, live_map.get(sym, {}))
+                mark_price = float(live_p.get("markPrice", 0.0))
+                if mark_price <= 0 and entry_price > 0:
+                    try:
+                        mark_price = weex_client.get_mark_price(weex_sym)
+                    except Exception:
+                        mark_price = entry_price
+
+                if entry_price > 0 and mark_price > 0:
+                    # Calculate current unrealized gain %
+                    if side == "LONG":
+                        gain_pct = (mark_price - entry_price) / entry_price
+                    else:  # SHORT
+                        gain_pct = (entry_price - mark_price) / entry_price
+
+                    peak_gain = max(pos_data.get("peak_gain_pct", 0.0), gain_pct)
+                    pos_data["peak_gain_pct"] = peak_gain
+
+                    # --- A. Break-Even Stop Loss Guard (+1.5% Gain) ---
+                    if peak_gain >= config.BREAKEVEN_TRIGGER_PCT and not pos_data.get("break_even_triggered"):
+                        pos_data["break_even_triggered"] = True
+                        if side == "LONG":
+                            be_sl = entry_price * (1.0 + config.BREAKEVEN_BUFFER_PCT)
+                        else:  # SHORT
+                            be_sl = entry_price * (1.0 - config.BREAKEVEN_BUFFER_PCT)
+
+                        pos_data["stop_loss"] = be_sl
+                        pos_data["stop_loss_type"] = "BREAK_EVEN"
+                        self.save()
+
+                        # Attempt updating native position SL on WEEX API
+                        weex_client.set_position_tpsl(weex_sym, side, sl_price=be_sl)
+
+                        logger.info(f"🛡️ BREAK-EVEN ACTIVATED for {sym} ({side}): Peak gain +{peak_gain*100:.2f}%. New SL=${be_sl:.4f}")
+                        if notifier:
+                            notifier.notify_profit_protection(sym, side, peak_gain * 100, be_sl)
+
+                    # --- B. Dynamic Trailing Profit Lock (+3.0%+ Gain) ---
+                    if peak_gain >= config.TRAILING_PROFIT_TRIGGER_PCT:
+                        retained_gain = peak_gain * config.TRAILING_PROFIT_RETENTION
+                        if side == "LONG":
+                            trailing_sl = entry_price * (1.0 + retained_gain)
+                            curr_sl = float(pos_data.get("stop_loss", 0.0))
+                            if trailing_sl > curr_sl:
+                                pos_data["stop_loss"] = trailing_sl
+                                pos_data["stop_loss_type"] = "TRAILING_LOCK"
+                                self.save()
+                                weex_client.set_position_tpsl(weex_sym, side, sl_price=trailing_sl)
+                                logger.info(f"💰 TRAILING PROFIT FLOOR RAISED for {sym} ({side}): Peak +{peak_gain*100:.2f}%, Lock Floor +{retained_gain*100:.2f}% (${trailing_sl:.4f})")
+                        else:  # SHORT
+                            trailing_sl = entry_price * (1.0 - retained_gain)
+                            curr_sl = float(pos_data.get("stop_loss", float("inf")))
+                            if trailing_sl < curr_sl:
+                                pos_data["stop_loss"] = trailing_sl
+                                pos_data["stop_loss_type"] = "TRAILING_LOCK"
+                                self.save()
+                                weex_client.set_position_tpsl(weex_sym, side, sl_price=trailing_sl)
+                                logger.info(f"💰 TRAILING PROFIT FLOOR LOWERED for {sym} ({side}): Peak +{peak_gain*100:.2f}%, Lock Floor +{retained_gain*100:.2f}% (${trailing_sl:.4f})")
+
+                    # --- C. Automated Software-Side Exit Protection ---
+                    stop_floor = float(pos_data.get("stop_loss", 0.0))
+                    is_be = pos_data.get("break_even_triggered", False)
+
+                    if is_be and stop_floor > 0:
+                        should_close = False
+                        if side == "LONG" and mark_price <= stop_floor:
+                            should_close = True
+                        elif side == "SHORT" and mark_price >= stop_floor:
+                            should_close = True
+
+                        if should_close:
+                            sl_type = pos_data.get("stop_loss_type", "BREAK_EVEN")
+                            logger.info(f"🛡️ EXECUTING PROFIT-LOCK MARKET CLOSE for {sym} ({side}) at ${mark_price:.4f} (Floor ${stop_floor:.4f}).")
+                            weex_client.close_position(weex_sym, side, quantity)
+                            self.record_position_close(sym, exit_reason=f"PROFIT_PROTECTION_{sl_type}")
+                            if notifier:
+                                notifier.notify_profit_locked(sym, side, gain_pct * 100, mark_price)
 
         except Exception as e:
             logger.warning(f"Could not synchronize positions with WEEX: {e}")
