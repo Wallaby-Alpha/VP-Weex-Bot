@@ -309,15 +309,22 @@ class WeexClient:
     ) -> bool:
         """
         Sets or updates native position-level Take Profit / Stop Loss trigger prices on WEEX.
+        Includes WEEX V3 required planType and workingType fields so exchange UI displays the updated SL.
         """
         payload = {
             "symbol": symbol,
-            "holdSide": position_side.upper()
+            "holdSide": position_side.upper(),
+            "positionSide": position_side.upper(),
+            "planType": "PROFIT_LOSS",
+            "workingType": "MARK_PRICE",
+            "triggerType": "MARK_PRICE"
         }
         if tp_price is not None and float(tp_price) > 0:
             payload["takeProfitPrice"] = str(tp_price)
+            payload["tpTriggerPrice"] = str(tp_price)
         if sl_price is not None and float(sl_price) > 0:
             payload["stopLossPrice"] = str(sl_price)
+            payload["slTriggerPrice"] = str(sl_price)
 
         res = self.request("POST", "/capi/v3/order/tpsl", payload)
         if isinstance(res, dict):
