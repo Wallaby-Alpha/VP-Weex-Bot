@@ -1,4 +1,6 @@
 import time
+import datetime
+from zoneinfo import ZoneInfo
 import logging
 from typing import List, Dict, Any, Optional
 import requests
@@ -20,6 +22,30 @@ MEXC_BASE_URL = "https://api.mexc.com"
 
 # Cache for BTC 12-bar return to evaluate relative strength
 btc_return_cache = {"timestamp": 0, "return_12": 0.0}
+
+def get_last_completed_ny_session_range(now_dt=None):
+    """
+    Computes the exact timestamp window (09:30:00 to 16:00:00 US/Eastern) of the
+    most recently COMPLETED New York session, accounting for weekends and current time.
+    """
+    tz = ZoneInfo("America/New_York")
+    now = datetime.datetime.now(tz) if now_dt is None else now_dt.astimezone(tz)
+    cur_date = now.date()
+    dow = now.weekday()  # 0=Mon, 4=Fri, 5=Sat, 6=Sun
+    close_time = datetime.time(16, 0)
+
+    if dow == 5:  # Saturday -> Friday's NY
+        target_date = cur_date - datetime.timedelta(days=1)
+    elif dow == 6:  # Sunday -> Friday's NY
+        target_date = cur_date - datetime.timedelta(days=2)
+    elif dow == 0:  # Monday -> if before 16:00, Friday's NY; else Monday's NY
+        target_date = cur_date - datetime.timedelta(days=3) if now.time() < close_time else cur_date
+    else:  # Tuesday-Friday -> if before 16:00, Yesterday's NY; else Today's NY
+        target_date = cur_date - datetime.timedelta(days=1) if now.time() < close_time else cur_date
+
+    dt_start = datetime.datetime.combine(target_date, datetime.time(9, 30), tzinfo=tz)
+    dt_end = datetime.datetime.combine(target_date, datetime.time(16, 0), tzinfo=tz)
+    return target_date, int(dt_start.timestamp() * 1000), int(dt_end.timestamp() * 1000)
 
 def fetch_btc_12bar_return(session: requests.Session) -> float:
     now = time.time()
@@ -51,6 +77,7 @@ class MarketScanner:
         self.session = requests.Session()
         self.weex_client = weex_client
         self.weex_api_symbols = set()
+        self.ny_profiles_cache = {}
         self.load_weex_api_symbols()
 
     def load_weex_api_symbols(self):
@@ -178,18 +205,61 @@ class MarketScanner:
         df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
         return df
 
+    def get_ny_session_profile(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetches the exact 78 five-minute bars of the most recently completed NY session
+        (09:30 - 16:00 US/Eastern) directly using startTime and endTime, and caches the VP levels.
+        Guarantees that weekend and weekday scans always anchor to the true completed NY Value Area.
+        """
+        target_date, start_ms, end_ms = get_last_completed_ny_session_range()
+        cache_key = (symbol, str(target_date))
+
+        if cache_key in self.ny_profiles_cache:
+            return self.ny_profiles_cache[cache_key]
+
+        params = {
+            "symbol": symbol,
+            "interval": config.TIMEFRAME,
+            "startTime": start_ms,
+            "endTime": end_ms,
+            "limit": 100
+        }
+        try:
+            r = self.session.get(f"{MEXC_BASE_URL}/api/v3/klines", params=params, timeout=10)
+            if r.status_code == 200:
+                raw = r.json()
+                if isinstance(raw, list) and len(raw) >= 15:
+                    df = pd.DataFrame(raw, columns=[
+                        "open_time", "open", "high", "low", "close", "volume",
+                        "close_time", "quote_volume"
+                    ])
+                    for col in ["close", "volume"]:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                    vah, val, poc = compute_vp_levels(df, config.NUM_BINS, config.VAL_PCT)
+                    if vah is not None and val is not None and poc is not None:
+                        profile = {
+                            "name": f"NY Session ({target_date})",
+                            "date": str(target_date),
+                            "vah": vah,
+                            "val": val,
+                            "poc": poc
+                        }
+                        self.ny_profiles_cache[cache_key] = profile
+                        return profile
+        except Exception as e:
+            logger.warning(f"Failed to fetch NY session klines for {symbol}: {e}")
+
+        return None
+
     def evaluate_signal(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
         Evaluates the latest completed 5-minute candle against the strategy logic:
-        When REQUIRE_SESSION_CONFLUENCE is True:
-          - Calculates institutional Volume Profiles for both New York and Asia sessions.
-          - Requires both sessions to confirm a trap reclaim in the EXACT SAME direction.
-          - Targets the nearest institutional POC hurdle (min 1.00% profit hurdle).
-          - Sets stop-loss beyond recent sweep extremes with dynamic ATR buffer.
+        - Anchors strictly to the completed NY Session Volume Profile.
+        - Evaluates sweep-and-reclaim of the Value Area.
+        - Gated by 6-factor directional confluence.
         """
-        limit = config.KLINE_FETCH_LIMIT if config.REQUIRE_SESSION_CONFLUENCE else (config.LOOKBACK_BARS + 30)
-        df = self.fetch_recent_klines(symbol, limit=limit)
-        if len(df) < (100 if config.REQUIRE_SESSION_CONFLUENCE else (config.LOOKBACK_BARS + 15)):
+        df = self.fetch_recent_klines(symbol, limit=120)
+        if len(df) < (config.LOOKBACK_BARS + 15):
             return None
 
         df["atr"] = calculate_atr(df, config.ATR_PERIOD)
@@ -219,8 +289,7 @@ class MarketScanner:
         # =========================================================================
         # VP-WEEX-BOT V2: STRICT NY SESSION VA RECLAIM + SCORED CONFLUENCE
         # =========================================================================
-        profiles = compute_session_profiles(df, config.NUM_BINS, config.VAL_PCT)
-        ny_p = profiles.get("ny")
+        ny_p = self.get_ny_session_profile(symbol)
 
         # Anchored strictly to NY Session Volume Profile (09:30-16:00 ET)
         if ny_p:
