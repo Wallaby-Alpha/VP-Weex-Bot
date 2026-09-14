@@ -217,19 +217,15 @@ class MarketScanner:
         weex_symbol, multiplier = resolved if resolved else (symbol, 1.0)
 
         # =========================================================================
-        # VP-WEEX-BOT V2: NY SESSION VA RECLAIM + SCORED CONFLUENCE STRATEGY
+        # VP-WEEX-BOT V2: STRICT NY SESSION VA RECLAIM + SCORED CONFLUENCE
         # =========================================================================
         profiles = compute_session_profiles(df, config.NUM_BINS, config.VAL_PCT)
         ny_p = profiles.get("ny")
-        asia_p = profiles.get("asia")
 
-        # Priority: NY session > Asia session > 6h rolling fallback
+        # Anchored strictly to NY Session Volume Profile (09:30-16:00 ET)
         if ny_p:
             ref_vah, ref_val, ref_poc = ny_p["vah"], ny_p["val"], ny_p["poc"]
             profile_name = ny_p["name"]
-        elif asia_p:
-            ref_vah, ref_val, ref_poc = asia_p["vah"], asia_p["val"], asia_p["poc"]
-            profile_name = asia_p["name"]
         else:
             sub_df = df.iloc[-config.LOOKBACK_BARS - 2:-2]
             ref_vah, ref_val, ref_poc = compute_vp_levels(sub_df, config.NUM_BINS, config.VAL_PCT, curr_price=c_price)
