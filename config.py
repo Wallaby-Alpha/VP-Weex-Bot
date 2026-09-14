@@ -50,7 +50,7 @@ NY_TIMEZONE = "America/New_York"
 ASIA_SESSION_OPEN = "00:00:00"
 ASIA_SESSION_CLOSE = "08:00:00"
 ASIA_TIMEZONE = "UTC"
-KLINE_FETCH_LIMIT = 500     # Sufficient bars to encompass completed NY and Asia sessions
+KLINE_FETCH_LIMIT = 1000     # 1000 bars (~83 hours) guarantees reaching Friday's completed NY session on weekends
 
 # --- Risk Circuit Breaker ---
 MAX_CONSECUTIVE_LOSSES = 2
