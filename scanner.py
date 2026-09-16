@@ -342,6 +342,17 @@ class MarketScanner:
             logger.debug(f"{symbol} ({raw_side}): Confluence score {score}/{config.MIN_CONFLUENCE_SCORE} insufficient. {breakdown}")
             return None
 
+        # Exclude hyper-breakout scores (empirically 0% mean-reversion win rate)
+        if score > config.MAX_CONFLUENCE_SCORE:
+            logger.info(f"{symbol} ({raw_side}): Confluence score {score}/7 exceeds mean-reversion ceiling ({config.MAX_CONFLUENCE_SCORE}/7). Market in strong breakout momentum.")
+            return None
+
+        # Mandatory BTC Relative Strength filter (the only consistently profitable confluence factor)
+        if getattr(config, "REQUIRE_BTC_REL_STRENGTH", True):
+            if breakdown.get("BTC Rel Strength", 0) <= 0:
+                logger.debug(f"{symbol} ({raw_side}): Rejected because setup lacks BTC Relative Strength alignment.")
+                return None
+
         # --- 3. Target Selection: Opposite Value Area Edge ---
         if raw_side == "LONG":
             target_price = ref_vah  # Target opposite edge (VAH)
@@ -357,8 +368,13 @@ class MarketScanner:
             stop_loss = min(raw_sl, c_price * (1.0 - config.MIN_STOP_PCT))
             risk = c_price - stop_loss
             risk_pct = (risk / c_price) * 100
-            rr = reward / risk if risk > 0 else 0
 
+            # Enforce maximum Stop Loss ceiling (reject bloated stops > 2.50%)
+            if (risk / c_price) > config.MAX_STOP_PCT:
+                logger.debug(f"{symbol} (LONG): Rejected due to bloated SL distance ({risk_pct:.2f}% > {config.MAX_STOP_PCT*100:.2f}% max).")
+                return None
+
+            rr = reward / risk if risk > 0 else 0
             if risk <= 0 or rr < config.MIN_RR:
                 return None
 
@@ -401,8 +417,13 @@ class MarketScanner:
             stop_loss = max(raw_sl, c_price * (1.0 + config.MIN_STOP_PCT))
             risk = stop_loss - c_price
             risk_pct = (risk / c_price) * 100
-            rr = reward / risk if risk > 0 else 0
 
+            # Enforce maximum Stop Loss ceiling (reject bloated stops > 2.50%)
+            if (risk / c_price) > config.MAX_STOP_PCT:
+                logger.debug(f"{symbol} (SHORT): Rejected due to bloated SL distance ({risk_pct:.2f}% > {config.MAX_STOP_PCT*100:.2f}% max).")
+                return None
+
+            rr = reward / risk if risk > 0 else 0
             if risk <= 0 or rr < config.MIN_RR:
                 return None
 

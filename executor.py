@@ -104,9 +104,32 @@ class TradeExecutor:
         if available_balance <= 0:
             available_balance = 1000.0  # Safe simulation baseline for dry-run
 
-        # Capital allocation = 10% of portfolio * leverage
-        allocated_capital = available_balance * config.POSITION_SIZE_PCT
-        notional = allocated_capital * config.DEFAULT_LEVERAGE
+        # Format TP, SL & POC to price precision using the scale ratio
+        tp_raw = signal.get("take_profit")
+        sl_raw = signal.get("stop_loss")
+        poc_raw = signal.get("poc")
+        tp_price = round(float(tp_raw) * scale_ratio, price_prec) if tp_raw is not None else None
+        sl_price = round(float(sl_raw) * scale_ratio, price_prec) if sl_raw is not None else None
+        poc_price = round(float(poc_raw) * scale_ratio, price_prec) if poc_raw is not None else None
+        if price_prec == 0:
+            if tp_price is not None:
+                tp_price = int(tp_price)
+            if sl_price is not None:
+                sl_price = int(sl_price)
+            if poc_price is not None:
+                poc_price = int(poc_price)
+
+        # Risk-Parity Sizing:
+        # Every trade risks a fixed dollar amount = max(balance * RISK_PER_TRADE_PCT, MIN_DOLLAR_RISK)
+        # Position Notional = Dollar Risk / Stop Loss Distance %
+        sl_dist_pct = abs(entry_price - sl_price) / (entry_price + 1e-9) if sl_price else config.MIN_STOP_PCT
+        effective_sl_pct = max(sl_dist_pct, config.MIN_STOP_PCT)
+        dollar_risk = max(available_balance * config.RISK_PER_TRADE_PCT, config.MIN_DOLLAR_RISK)
+        target_notional = dollar_risk / effective_sl_pct
+
+        # Maximum capital allocation collar: 10% of portfolio margin * leverage
+        max_collar_notional = available_balance * config.POSITION_SIZE_PCT * config.DEFAULT_LEVERAGE
+        notional = min(target_notional, max_collar_notional)
         raw_qty = notional / entry_price
 
         # Round down to exchange quantity precision
@@ -117,16 +140,10 @@ class TradeExecutor:
         if qty_prec == 0 or quantity.is_integer():
             quantity = int(quantity)
 
-        # Format TP & SL to price precision using the scale ratio
-        tp_raw = signal.get("take_profit")
-        sl_raw = signal.get("stop_loss")
-        tp_price = round(float(tp_raw) * scale_ratio, price_prec) if tp_raw is not None else None
-        sl_price = round(float(sl_raw) * scale_ratio, price_prec) if sl_raw is not None else None
-        if price_prec == 0:
-            if tp_price is not None:
-                tp_price = int(tp_price)
-            if sl_price is not None:
-                sl_price = int(sl_price)
+        logger.info(
+            f"Risk Sizing for {weex_symbol}: Balance=${available_balance:.2f}, Risk=${dollar_risk:.2f} ({config.RISK_PER_TRADE_PCT*100:.1f}%), "
+            f"SL Dist={effective_sl_pct*100:.2f}%, Target Notional=${target_notional:.2f}, Final Notional=${notional:.2f}, Qty={quantity}"
+        )
 
         trade_record = {
             "symbol": symbol,
@@ -136,6 +153,7 @@ class TradeExecutor:
             "entry_price": entry_price,
             "take_profit": tp_price,
             "stop_loss": sl_price,
+            "poc_price": poc_price,
             "quantity": quantity,
             "risk_pct": signal["risk_pct"],
             "reward_pct": signal["reward_pct"],

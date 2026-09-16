@@ -58,9 +58,8 @@ class StateManager:
 
     def record_loss(self, symbol: str) -> bool:
         """
-        Increments consecutive loss counter.
-        Triggers a 2-hour freeze if losses reach MAX_CONSECUTIVE_LOSSES (2).
-        Returns True if circuit breaker was triggered.
+        Increments consecutive loss counter and freezes the symbol for POST_LOSS_COOLDOWN_HOURS
+        to prevent immediate repeat knife-catching entries.
         """
         if "circuit_breaker" not in self.state:
             self.state["circuit_breaker"] = {}
@@ -68,13 +67,20 @@ class StateManager:
         cb = self.state["circuit_breaker"].get(symbol, {"consecutive_losses": 0, "frozen_until": 0})
         cb["consecutive_losses"] = cb.get("consecutive_losses", 0) + 1
 
+        cooldown_secs = int(config.POST_LOSS_COOLDOWN_HOURS * 3600)
+        curr_frozen = cb.get("frozen_until", 0)
+        new_frozen = max(curr_frozen, time.time() + cooldown_secs)
+        cb["frozen_until"] = new_frozen
+
         triggered = False
         if cb["consecutive_losses"] >= config.MAX_CONSECUTIVE_LOSSES:
             freeze_duration = config.CIRCUIT_BREAKER_FREEZE_BARS * 300  # 24 bars * 300s = 2 hours
-            cb["frozen_until"] = time.time() + freeze_duration
+            cb["frozen_until"] = max(new_frozen, time.time() + freeze_duration)
             cb["consecutive_losses"] = 0
             triggered = True
             logger.warning(f"CIRCUIT BREAKER TRIGGERED for {symbol}: Frozen for {freeze_duration // 3600} hours.")
+        else:
+            logger.info(f"Post-loss cooldown applied to {symbol}: Frozen for {config.POST_LOSS_COOLDOWN_HOURS} hours.")
 
         self.state["circuit_breaker"][symbol] = cb
         self.save()
@@ -118,29 +124,32 @@ class StateManager:
     def get_active_positions_count(self) -> int:
         return len(self.state.get("active_positions", {}))
 
-    def sync_with_exchange(self, weex_client, notifier=None):
+    def monitor_and_update_positions(self, weex_client, notifier=None):
         """
-        Synchronizes state with actual open contract positions on WEEX.
-        Detects closed positions (TP/SL hits on exchange) and frees slots.
-        Also evaluates active positions for Break-Even SL adjustment and Trailing Profit Retention
-        to prevent trades with high unrealized gains (e.g. +5% to +28%) from roundtripping into losses.
+        1. Checks whether active positions were closed on WEEX and frees their slot.
+        2. Monitors mark prices to raise Stop Loss to Break-Even at +0.90% gain or POC hit.
+        3. Dynamically trails Stop Loss when peak profit reaches +2.5%+.
+        4. Enforces software-side market close if mark price triggers the local floor.
         """
-        try:
-            live_positions = weex_client.get_active_positions()
-            live_map = {}
-            live_symbols = set()
+        if not self.state.get("active_positions"):
+            return
 
-            for p in live_positions:
-                sym = p.get("symbol", "")
-                if sym:
-                    live_symbols.add(sym)
-                    live_map[sym] = p
-                    if sym.startswith("1000"):
-                        clean_sym = sym[4:]
+        try:
+            live_positions = weex_client.get_positions()
+            live_symbols = set()
+            live_map = {}
+            if isinstance(live_positions, list):
+                for p in live_positions:
+                    hold_qty = float(p.get("holdAmount", 0.0))
+                    total_qty = float(p.get("total", 0.0))
+                    if hold_qty > 0 or total_qty > 0:
+                        sym_name = p.get("symbol", "")
+                        live_symbols.add(sym_name)
+                        live_map[sym_name] = p
+                        clean_sym = sym_name.replace("_A", "")
                         live_symbols.add(clean_sym)
                         live_map[clean_sym] = p
-                    else:
-                        mult_sym = f"1000{sym}"
+                        mult_sym = clean_sym.replace("1000", "")
                         live_symbols.add(mult_sym)
                         live_map[mult_sym] = p
 
@@ -153,10 +162,24 @@ class StateManager:
 
                 # 1. Closed Position Detection
                 if sym not in live_symbols and weex_sym not in live_symbols:
-                    logger.info(f"Position {sym} ({weex_sym}) closed on WEEX (TP/SL triggered). Clearing slot.")
-                    self.record_position_close(sym, exit_reason="TP/SL_TRIGGERED_ON_EXCHANGE")
+                    target_tp = float(pos_data.get("take_profit", 0.0))
+                    peak_gain = float(pos_data.get("peak_gain_pct", 0.0))
+                    reward_pct = float(pos_data.get("reward_pct", 0.0)) / 100.0
+                    was_be = pos_data.get("break_even_triggered", False)
+
+                    # If peak gain never reached near TP and Break-Even was not active, treat as Stop Loss
+                    is_loss = not was_be and (peak_gain < (reward_pct * 0.80 if reward_pct > 0 else 0.015))
+                    if is_loss:
+                        self.record_loss(sym)
+                        exit_status = "Stop Loss Hit on WEEX"
+                    else:
+                        self.record_win(sym)
+                        exit_status = "Take Profit / Profit Protection Hit on WEEX"
+
+                    logger.info(f"Position {sym} ({weex_sym}) closed on WEEX ({exit_status}). Clearing slot.")
+                    self.record_position_close(sym, exit_reason=exit_status)
                     if notifier:
-                        notifier.notify_trade_closed(sym, exit_reason="TP/SL Hit on WEEX")
+                        notifier.notify_trade_closed(sym, exit_reason=exit_status)
                     continue
 
                 # 2. Profit Protection & Dynamic Break-Even Monitoring
@@ -178,9 +201,19 @@ class StateManager:
                     peak_gain = max(pos_data.get("peak_gain_pct", 0.0), gain_pct)
                     pos_data["peak_gain_pct"] = peak_gain
 
-                    # --- A. Break-Even Stop Loss Guard (+1.5% Gain) ---
-                    if peak_gain >= config.BREAKEVEN_TRIGGER_PCT and not pos_data.get("break_even_triggered"):
+                    # Point of Control (POC) check
+                    poc_price = float(pos_data.get("poc_price", 0.0))
+                    poc_hit = False
+                    if poc_price > 0:
+                        if side == "LONG" and mark_price >= poc_price:
+                            poc_hit = True
+                        elif side == "SHORT" and mark_price <= poc_price:
+                            poc_hit = True
+
+                    # --- A. Break-Even Stop Loss Guard (+0.90% Gain or POC Hit) ---
+                    if (peak_gain >= config.BREAKEVEN_TRIGGER_PCT or poc_hit) and not pos_data.get("break_even_triggered"):
                         pos_data["break_even_triggered"] = True
+                        trigger_reason = "Session POC Reached" if poc_hit else f"Peak gain +{peak_gain*100:.2f}%"
                         if side == "LONG":
                             be_sl = entry_price * (1.0 + config.BREAKEVEN_BUFFER_PCT)
                         else:  # SHORT
@@ -193,7 +226,7 @@ class StateManager:
                         # Attempt updating native position SL on WEEX API
                         weex_client.set_position_tpsl(weex_sym, side, sl_price=be_sl)
 
-                        logger.info(f"🛡️ BREAK-EVEN ACTIVATED for {sym} ({side}): Peak gain +{peak_gain*100:.2f}%. New SL=${be_sl:.4f}")
+                        logger.info(f"🛡️ BREAK-EVEN ACTIVATED for {sym} ({side}): {trigger_reason}. New SL=${be_sl:.4f}")
                         if notifier:
                             notifier.notify_profit_protection(sym, side, peak_gain * 100, be_sl)
 
@@ -240,6 +273,9 @@ class StateManager:
 
         except Exception as e:
             logger.warning(f"Could not synchronize positions with WEEX: {e}")
+
+    # Backward-compatible alias used by main daemon loop
+    sync_with_exchange = monitor_and_update_positions
 
     def is_daily_loss_limit_reached(self, current_balance: float) -> bool:
         """
