@@ -356,12 +356,14 @@ class WeexClient:
 
         active = []
         for p in raw_list:
-            size = float(p.get("size") or p.get("total") or 0.0)
+            size = float(p.get("size") or p.get("total") or p.get("holdAmount") or 0.0)
             if size > 0:
                 active.append({
                     "symbol": p.get("symbol"),
                     "side": "SHORT" if p.get("side") == "SHORT" else "LONG",
                     "size": size,
+                    "total": size,
+                    "holdAmount": size,
                     "openValue": float(p.get("openValue", 0.0)),
                     "entryPrice": float(p.get("openPrice") or p.get("entryPrice") or 0.0),
                     "markPrice": float(p.get("markPrice") or p.get("last") or 0.0),
@@ -370,3 +372,7 @@ class WeexClient:
                     "slOrderId": p.get("stopLossId") or p.get("slOrderId")
                 })
         return active
+
+    # Backward compatibility alias
+    get_positions = get_active_positions
+

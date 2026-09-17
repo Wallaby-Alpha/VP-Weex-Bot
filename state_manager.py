@@ -135,14 +135,19 @@ class StateManager:
             return
 
         try:
-            live_positions = weex_client.get_positions()
+            if hasattr(weex_client, "get_active_positions"):
+                live_positions = weex_client.get_active_positions()
+            elif hasattr(weex_client, "get_positions"):
+                live_positions = weex_client.get_positions()
+            else:
+                live_positions = []
+
             live_symbols = set()
             live_map = {}
             if isinstance(live_positions, list):
                 for p in live_positions:
-                    hold_qty = float(p.get("holdAmount", 0.0))
-                    total_qty = float(p.get("total", 0.0))
-                    if hold_qty > 0 or total_qty > 0:
+                    pos_size = float(p.get("size", 0.0) or p.get("holdAmount", 0.0) or p.get("total", 0.0))
+                    if pos_size > 0:
                         sym_name = p.get("symbol", "")
                         live_symbols.add(sym_name)
                         live_map[sym_name] = p
